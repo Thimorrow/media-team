@@ -1,0 +1,64 @@
+{
+  "id": "media-team-roles",
+  "title": "Aufgaben nach Dienst",
+  "roles": [
+    {
+      "id": "propresenter",
+      "title": "ProPresenter-Team",
+      "sections": [
+        {
+          "id": "before-service",
+          "title": "Vor dem Dienst",
+          "tasks": [
+            { "id": "propresenter-texts-add", "title": "Texte hinzufügen" },
+            { "id": "propresenter-texts-check", "title": "Texte prüfen" },
+            {
+              "id": "propresenter-backgrounds",
+              "title": "Passende Hintergründe auswählen"
+            },
+            { "id": "propresenter-announcements", "title": "Ankündigungen prüfen und ergänzen" },
+            {
+              "id": "propresenter-videos",
+              "title": "Geplante Videos prüfen",
+              "details": "Falls Videos ausgestrahlt werden sollen, die Wiedergabe mit der Tontechnik absprechen."
+            },
+            { "id": "propresenter-soundcheck", "title": "Soundcheck mit der Tontechnik machen" }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "sound",
+      "title": "Tontechnik",
+      "sections": [
+        {
+          "id": "before-service",
+          "title": "Vor dem Dienst",
+          "tasks": [
+            { "id": "sound-microphone-batteries", "title": "Ladestand der Mikrofone prüfen" },
+            { "id": "sound-preacher-microphones", "title": "Zusätzliche Mikrofone für die Predigt bereitstellen" },
+            {
+              "id": "sound-sign-language-iem",
+              "title": "In-Ear für das Gebärdensprach-Team bereitstellen"
+            },
+            { "id": "sound-light-computer", "title": "Lichtcomputer einschalten" },
+            { "id": "sound-propresenter-soundcheck", "title": "Soundcheck mit dem ProPresenter-Team machen" }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "lighting",
+      "title": "Licht",
+      "sections": [
+        {
+          "id": "before-service",
+          "title": "Vor dem Dienst",
+          "tasks": [
+            { "id": "lighting-on", "title": "Licht einschalten" }
+          ]
+        }
+      ]
+    }
+  ]
+}

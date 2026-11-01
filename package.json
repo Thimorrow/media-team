@@ -1,0 +1,31 @@
+{
+  "name": "media-team",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "scripts": {
+    "dev": "node --env-file-if-exists=.env.local scripts/dev.mjs",
+    "build": "tsc --noEmit && vite build",
+    "start": "node --env-file-if-exists=.env.local server/index.mjs",
+    "test": "node --test tests/*.test.mjs",
+    "check": "tsc --noEmit",
+    "demo": "node scripts/demo.mjs"
+  },
+  "dependencies": {
+    "lucide-react": "^1.66.0",
+    "postgres": "^4.0.0",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "web-haptics": "^0.0.6"
+  },
+  "devDependencies": {
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.1.2",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.5"
+  }
+}

@@ -1,0 +1,58 @@
+{
+  "id": "media-team-common",
+  "title": "Gemeinsame Checkliste",
+  "status": "draft",
+  "sections": [
+    {
+      "id": "before-service",
+      "title": "Vor dem Dienst",
+      "tasks": [
+        { "id": "computer-on", "title": "Computer einschalten" },
+        {
+          "id": "batteries-check",
+          "title": "Kamera-Akkus prüfen",
+          "details": "Akkus für Foto- und Videokamera auf volle Ladung prüfen. Nicht volle Akkus an die Ladestation legen."
+        },
+        {
+          "id": "screens-on",
+          "title": "Drei Bildschirme einschalten",
+          "details": "In der Küche, im Flur 2 und hinten neben dem Mediaraum.",
+          "clarification": "Die Ortsangabe Flur 2 wurde aus floor 2 übernommen und ist noch zu bestätigen."
+        },
+        {
+          "id": "projector-on",
+          "title": "Beamer einschalten"
+        },
+        { "id": "cameras-setup", "title": "Kameras auf die Stative stellen" },
+        { "id": "video-mixer-on", "title": "Videomischpult einschalten" },
+        { "id": "propresenter-start", "title": "ProPresenter starten" }
+      ]
+    },
+    {
+      "id": "after-service",
+      "title": "Nach dem Dienst",
+      "tasks": [
+        { "id": "propresenter-close", "title": "ProPresenter beenden" },
+        { "id": "video-mixer-off", "title": "Videomischpult ausschalten" },
+        { "id": "cameras-store", "title": "Kameras von den Stativen nehmen und verstauen" },
+        {
+          "id": "projector-off",
+          "title": "Beamer ausschalten"
+        },
+        {
+          "id": "screens-off",
+          "title": "Drei Bildschirme ausschalten",
+          "details": "In der Küche, im Flur 2 und hinten neben dem Mediaraum."
+        },
+        {
+          "id": "batteries-charge",
+          "title": "Kamera-Akkus an die Ladestation legen",
+          "confirmationRequired": true,
+          "clarification": "Vorschlag für den Abschluss des Akku-Punkts; das Prüfen der Ladung hat keine direkte Umkehrung."
+        },
+        { "id": "computer-off", "title": "Computer herunterfahren" },
+        { "id": "cleanliness-check", "title": "Sauberkeit prüfen" }
+      ]
+    }
+  ]
+}
