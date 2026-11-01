@@ -1,5 +1,7 @@
 # Media Team
 
+[Aktueller Quellstand](https://github.com/Thimorrow/media-team/tree/codex/preview/media-team) · [Geprüfte Vercel-Vorschau](https://media-team-6hrxft4gg-zapkothimofej-2616s-projects.vercel.app)
+
 Media Team organisiert Aufgaben für Gottesdienste. Allgemeine Aufgaben werden gemeinsam abgehakt; persönliche Aufgaben gehören jeweils zu einer Person und Rolle. Für jeden Gottesdienst entsteht eine eigene Liste, abgeschlossene Dienste können ins Archiv.
 
 Admins erstellen Einladungslinks und geben sie selbst weiter. Die App verschickt keine E-Mails. Änderungen an Vorlagen und Mitgliedsrollen gelten für zukünftige Termine beziehungsweise Dienste.

@@ -1,6 +1,6 @@
 # Media-Team-App
 
-Stand: 1. November 2026. Lokale Implementierung und direkte Supabase-Anbindung geprüft. Abschließende Vercel-Vorschau wird eingerichtet.
+Stand: 1. November 2026. Implementierung, direkte Supabase-Anbindung und Vercel-Vorschau sind geprüft. Einrichtung des ersten echten Admin-Kontos und Handy-Abnahme liegen beim Nutzer.
 
 ## Ziel
 
@@ -65,3 +65,16 @@ Die lokale Browserprüfung hat Anmeldung, Checkbox-Speicherung über Neuladen so
 - Unabhängige Arbeit: Oberfläche, API und PWA-Dateien wurden getrennt umgesetzt und danach integriert.
 - Geteilter Zustand: Team-Haken haben einen gemeinsamen Datensatz je Gottesdienst, persönliche Aufgaben einen Besitzer. Revisionsnummern verhindern unbemerkte Überschreibungen.
 - Zuständigkeit: Hauptagent integriert und prüft; unabhängige Sicherheitsprüfung und isolierte API-Tests sind erfolgt. Kein Merge beauftragt.
+
+## Bereitstellung und Übergabe
+
+- Geprüfte Code-Revision: `974bf78e13ce15e606e58f647057c7cfa687cf42`. GitHub-CI für diese Revision erfolgreich.
+- Funktionsfähige Vorschau: https://media-team-6hrxft4gg-zapkothimofej-2616s-projects.vercel.app
+- Vercel-Deployment: `dpl_AtKWKSaiLByJsCMHvuCALG1VnYxv`, Status READY, Ziel Preview. Revision und Branch sind über Vercel bestätigt.
+- Browser im Deployment: `/api/session` antwortet mit HTTP 200, Formular „Admin-Konto erstellen“ lädt ohne Datenbankfehler, ein absichtlich falscher Einrichtungscode wird abgewiesen, Service Worker ist aktiviert.
+- Das erste echte Admin-Konto wurde nicht durch den Agenten angelegt. Das ungesendete Formular ist im Ego-Browser geöffnet; nur der Einrichtungscode wurde in sein vorgesehenes Feld eingetragen, keine Übergabe über die URL.
+- `DATABASE_URL` und `SETUP_TOKEN` sind ausschließlich als geschützte Servervariablen am Vorschau-Branch hinterlegt. Keine Supabase-Marketplace-Ressource ist mit diesem Vercel-Projekt verbunden.
+- Supabase MCP ist projektbezogen konfiguriert, per OAuth angemeldet und durch echte MCP-SQL-Abfragen geprüft. Die laufende Chat-Sitzung konnte neu hinzugefügte Tools nicht nachladen; frische Codex-Aufrufe verwendeten den authentifizierten MCP-Server.
+- Repository ist öffentlich. Der aktuelle Stand liegt auf `codex/preview/media-team`; der ursprüngliche Standardbranch `codex/feat/media-team-app` wurde nicht verändert. Die automatische Freigabeprüfung hat einen Wechsel des Standardbranches abgelehnt. Aktuellen Quellstand daher über den Vorschau-Branch öffnen.
+- Dokumentationsänderungen nach der geprüften Code-Revision ändern kein Laufzeitverhalten. Weitere visuelle Änderungen sind auf Nutzerwunsch gestoppt.
+- Offen: erste echte Anmeldung durch den Nutzer; Installation, Bildschirmtastatur, sichere Bildschirmränder und tatsächliche Haptik auf echten Handys. Eine Desktop-Browseransicht ersetzt diese Abnahme nicht.
