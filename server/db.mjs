@@ -8,19 +8,33 @@ export async function openDatabase({ dbPath, databaseUrl, schema } = {}) {
     if (schemaName !== 'media_team' && !/^media_test_[a-z0-9_]+$/.test(schemaName)) throw new Error('Invalid database schema');
     const url = new URL(databaseUrl);
     const sql = postgres(databaseUrl, { max: 3, idle_timeout: 20, connect_timeout: 15, ssl: ['localhost', '127.0.0.1'].includes(url.hostname) ? false : 'require', prepare: false, onnotice: () => {} });
-    await sql.begin(async tx => {
-      await tx.unsafe('SELECT pg_advisory_xact_lock(741991)');
-      await tx.unsafe(`CREATE SCHEMA IF NOT EXISTS ${schemaName}`);
-      await tx.unsafe(`REVOKE ALL ON SCHEMA ${schemaName} FROM PUBLIC`);
-      const roles = await tx.unsafe("SELECT rolname FROM pg_roles WHERE rolname IN ('anon','authenticated')");
-      for (const { rolname } of roles) {
-        await tx.unsafe(`REVOKE ALL ON SCHEMA ${schemaName} FROM ${rolname}`);
-        await tx.unsafe(`REVOKE ALL ON ALL TABLES IN SCHEMA ${schemaName} FROM ${rolname}`);
-        await tx.unsafe(`ALTER DEFAULT PRIVILEGES IN SCHEMA ${schemaName} REVOKE ALL ON TABLES FROM ${rolname}`);
-      }
-      await tx.unsafe(`REVOKE ALL ON ALL TABLES IN SCHEMA ${schemaName} FROM PUBLIC`);
-      await tx.unsafe(`ALTER DEFAULT PRIVILEGES IN SCHEMA ${schemaName} REVOKE ALL ON TABLES FROM PUBLIC`);
-    });
+    try {
+      await sql.begin(async tx => {
+        await tx.unsafe('SELECT pg_advisory_xact_lock(741991)');
+        const [existing] = await tx.unsafe('SELECT nspowner=(SELECT oid FROM pg_roles WHERE rolname=current_user) AS owned FROM pg_namespace WHERE nspname=$1', [schemaName]);
+        const roles = await tx.unsafe("SELECT rolname FROM pg_roles WHERE rolname IN ('anon','authenticated')");
+        if (!existing) await tx.unsafe(`CREATE SCHEMA ${schemaName}`);
+        if (!existing || existing.owned) {
+          await tx.unsafe(`REVOKE ALL ON SCHEMA ${schemaName} FROM PUBLIC`);
+          for (const { rolname } of roles) await tx.unsafe(`REVOKE ALL ON SCHEMA ${schemaName} FROM ${rolname}`);
+        }
+        const [access] = await tx.unsafe("SELECT has_schema_privilege(current_user,$1,'USAGE') AND has_schema_privilege(current_user,$1,'CREATE') AS allowed", [schemaName]);
+        if (!access.allowed) throw new Error('The application role needs USAGE and CREATE on its private schema');
+        const [publicAccess] = await tx.unsafe("SELECT EXISTS(SELECT 1 FROM pg_namespace, LATERAL aclexplode(COALESCE(nspacl,acldefault('n',nspowner))) AS acl WHERE nspname=$1 AND acl.grantee=0 AND acl.privilege_type IN ('USAGE','CREATE')) AS allowed", [schemaName]);
+        if (publicAccess.allowed) throw new Error('The application schema must not grant access to PUBLIC');
+        for (const { rolname } of roles) {
+          const [webAccess] = await tx.unsafe("SELECT has_schema_privilege($1,$2,'USAGE') OR has_schema_privilege($1,$2,'CREATE') AS allowed", [rolname, schemaName]);
+          if (webAccess.allowed) throw new Error('The application schema must not be accessible to web API roles');
+          await tx.unsafe(`REVOKE ALL ON ALL TABLES IN SCHEMA ${schemaName} FROM ${rolname}`);
+          await tx.unsafe(`ALTER DEFAULT PRIVILEGES IN SCHEMA ${schemaName} REVOKE ALL ON TABLES FROM ${rolname}`);
+        }
+        await tx.unsafe(`REVOKE ALL ON ALL TABLES IN SCHEMA ${schemaName} FROM PUBLIC`);
+        await tx.unsafe(`ALTER DEFAULT PRIVILEGES IN SCHEMA ${schemaName} REVOKE ALL ON TABLES FROM PUBLIC`);
+      });
+    } catch (error) {
+      await sql.end({ timeout: 5 });
+      throw error;
+    }
     const qualify = statement => statement
       .replace(/\b(FROM|JOIN|INTO|UPDATE|TABLE IF NOT EXISTS|TABLE|REFERENCES)\s+(users|sessions|invites|settings|services|participants|tasks|rate_limits)\b/g, (_, keyword, table) => `${keyword} ${schemaName}.${table}`)
       .replace(/\bON\s+(users|sessions|invites|settings|services|participants|tasks|rate_limits)(?=\s*\()/g, (_, table) => `ON ${schemaName}.${table}`);

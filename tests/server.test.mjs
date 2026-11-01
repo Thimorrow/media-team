@@ -10,7 +10,7 @@ test('Media-Team API: Anmeldung, Berechtigungen, Gottesdienste und Persistenz', 
   const dir = await mkdtemp(join(tmpdir(), 'media-team-test-'));
   const dbPath = join(dir, 'test.sqlite');
   const databaseUrl = process.env.TEST_DATABASE_URL;
-  const schema = databaseUrl ? `media_test_${randomUUID().replaceAll('-', '')}` : undefined;
+  const schema = databaseUrl ? process.env.TEST_DATABASE_SCHEMA || `media_test_${randomUUID().replaceAll('-', '')}` : undefined;
   let app = await createApp({ dbPath, databaseUrl, schema, setupToken: 'test-setup-only' });
   await new Promise(resolve => app.server.listen(0, '127.0.0.1', resolve));
   let origin = `http://127.0.0.1:${app.server.address().port}`;
@@ -193,8 +193,12 @@ test('Media-Team API: Anmeldung, Berechtigungen, Gottesdienste und Persistenz', 
       assert.equal((await app.db.prepare('SELECT COUNT(*) n FROM users WHERE is_admin=1 AND active=1').get()).n, 1);
     });
   } finally {
-    if (schema) await app.db.exec(`DROP SCHEMA ${schema} CASCADE`);
-    await app.close();
-    await rm(dir, { recursive: true, force: true });
+    try {
+      const preserve = process.env.TEST_DATABASE_SCHEMA && process.env.TEST_PRESERVE_SCHEMA === '1';
+      if (schema && !preserve) await app.db.exec(`DROP SCHEMA ${schema} CASCADE`);
+    } finally {
+      await app.close();
+      await rm(dir, { recursive: true, force: true });
+    }
   }
 });

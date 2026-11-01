@@ -26,7 +26,7 @@ Für die Entwicklung startet `npm run dev` die Oberfläche auf Port 5173 und die
 
 Für eine Vercel Preview werden das Frontend und die Serverfunktion `api/index.mjs` verwendet. Eine direkte Supabase-Postgres-Verbindung wird über `DATABASE_URL` oder `POSTGRES_URL` und der Einrichtungscode über `SETUP_TOKEN` konfiguriert. Ein Marketplace ist dafür nicht erforderlich. Die Tabellen liegen im privaten Schema `media_team`; Datenbankschlüssel gehören nicht in den Browser. Zugangsdaten und andere Geheimnisse niemals committen. `.local/` und `.env`-Dateien sind von Git ausgeschlossen.
 
-Die Datenbank für die Bereitstellung wird noch eingerichtet; eine funktionierende Bereitstellung ist damit noch nicht bestätigt.
+Die direkte Supabase-Verbindung ist mit einem eigenen Datenbank-Login eingerichtet und gegen ein getrenntes Testschema geprüft. Das private Schema kann vorab vom Datenbank-Admin angelegt und dem App-Login ausschließlich mit `USAGE, CREATE` freigegeben werden. Laufzeit, Datenbank und menschliche Abnahme bleiben getrennte Prüfungen.
 
 ## Prüfungen
 
@@ -36,4 +36,4 @@ npm test
 npm run build
 ```
 
-Die Tests verwenden standardmäßig eine temporäre SQLite-Datenbank. Optional lässt sich mit `TEST_DATABASE_URL` eine Postgres-Datenbank testen; dafür wird ein isoliertes Testschema angelegt.
+Die Tests verwenden standardmäßig eine temporäre SQLite-Datenbank. Optional lässt sich mit `TEST_DATABASE_URL` eine Postgres-Datenbank testen; dafür wird ein isoliertes Testschema angelegt. Für einen eingeschränkten Datenbank-Login kann ein eigenes Schema über `TEST_DATABASE_SCHEMA` vorab bereitgestellt werden. Mit `TEST_PRESERVE_SCHEMA=1` bleibt es für die anschließende Bereinigung durch den Datenbank-Admin erhalten. Dafür ausschließlich separate Testschemas verwenden.

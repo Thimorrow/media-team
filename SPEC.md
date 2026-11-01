@@ -1,6 +1,6 @@
 # Media-Team-App
 
-Stand: 1. November 2026. Lokale Implementierung vorhanden. Direkte Supabase-Anbindung und Vercel-Vorschau werden eingerichtet.
+Stand: 1. November 2026. Lokale Implementierung und direkte Supabase-Anbindung geprüft. Abschließende Vercel-Vorschau wird eingerichtet.
 
 ## Ziel
 
@@ -23,7 +23,7 @@ Eine auf dem Handy installierbare PWA für das Media-Team der Kirche. Jedes Mitg
 - Lochies WebHaptics wird für dezentes haptisches Feedback vorgesehen. Tatsächliche Haptik und Bedienung als installierte PWA brauchen einen Test auf echten Handys.
 - Login über E-Mail und Passwort. Admins erstellen Einladungslinks, verwalten Mitglieder und Dienste, bearbeiten Vorlagen und sehen den Fortschritt. Die App versendet keine E-Mails.
 - Arbeitsname: Media Team. Daten werden serverseitig gespeichert; der Browser erhält keine Datenbankschlüssel.
-- Öffentliches Repository: https://github.com/Thimorrow/media-team. Arbeitsbranch: `codex/feat/media-team-app`.
+- Öffentliches Repository: https://github.com/Thimorrow/media-team. Aktueller Vorschau-Branch: `codex/preview/media-team`.
 - Vercel-Vorschau ist beauftragt. Supabase wird direkt verwendet, ohne Vercel-Marketplace-Verknüpfung. Das vom Nutzer bereitgestellte Projekt ist `fhpsxgapmhcqwymtsloc`.
 - Seit der Anweisung „Fixe das ui noch nicht“ werden keine weiteren visuellen Verfeinerungen vorgenommen. Ein späterer UI-Umbau ist vom Nutzer vorgesehen.
 
@@ -53,11 +53,11 @@ Eine auf dem Handy installierbare PWA für das Media-Team der Kirche. Jedes Mitg
 
 ## Arbeitsstand
 
-React/TypeScript/Vite-Oberfläche und native Node-API sind implementiert. SQLite ist für lokale Arbeit vorgesehen, PostgreSQL für die direkte Supabase-Anbindung. Cloud-Tabellen liegen im privaten Schema `media_team`. Ein eigener Datenbank-Login `media_team_app` ist im bereitgestellten Projekt angelegt. Der erste echte Admin bleibt dem Nutzer vorbehalten.
+React/TypeScript/Vite-Oberfläche und native Node-API sind implementiert. SQLite ist für lokale Arbeit vorgesehen, PostgreSQL für die direkte Supabase-Anbindung. Cloud-Tabellen liegen im privaten Schema `media_team`. Das Schema bleibt im Eigentum des Datenbank-Admins, `media_team_app` hat dort ausschließlich USAGE und CREATE und besitzt die App-Tabellen. Keine Rollenmitgliedschaften wurden verändert. Der erste echte Admin bleibt dem Nutzer vorbehalten.
 
-Prüfungsbefehle: `npm run check`, `npm test`, `npm run build`. API-Tests verwenden temporäre SQLite-Daten. Mit `TEST_DATABASE_URL` ist derselbe Ablauf gegen ein isoliertes PostgreSQL-Testschema möglich. Echte Supabase-/Vercel-Nachweise werden nach erfolgreicher Verbindung ergänzt.
+Prüfungsbefehle: `npm run check`, `npm test`, `npm run build`. Alle lokalen Checks und der erste GitHub-CI-Lauf für `3001060` bestanden. Außerdem bestanden 14/14 API-Tests gegen das echte separate Supabase-Testschema, einschließlich Neustart, gemeinsamen/persönlichen Haken, Berechtigungen, Einladungen und konkurrierenden Änderungen. Das Testschema wurde anschließend per MCP entfernt. Das echte App-Schema enthält weiterhin keine Konten.
 
-Die lokale Browserprüfung hat Anmeldung und die gerenderte Dienstansicht gezeigt. Ein Smartphone und die installierte PWA wurden noch nicht geprüft. Die Demo verwendet ausschließlich `.local/demo.sqlite`.
+Die lokale Browserprüfung hat Anmeldung, Checkbox-Speicherung über Neuladen sowie das Anlegen eines neuen Gottesdiensts mit offenen Aufgaben bestätigt. Das native Datumfeld wurde im Browser-Test über DOM-Eingabeereignisse gesetzt. Ein Smartphone und die installierte PWA wurden noch nicht geprüft. Die Demo verwendet ausschließlich `.local/demo.sqlite`.
 
 ## Ausführung
 
