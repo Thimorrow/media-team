@@ -12,9 +12,9 @@ export async function api<T>(path: string, body?: unknown, method = 'POST'): Pro
       ...(body === undefined ? {} : { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }),
     });
   } catch {
-    throw new ApiError('Keine Verbindung. Bitte prüfe dein Internet und versuche es erneut.', 0);
+    throw new ApiError('Keine Verbindung. Prüfe dein Internet und versuche es erneut.', 0);
   }
   const data = await response.json().catch(() => ({}));
-  if (!response.ok) throw new ApiError(data.error || 'Die Anfrage konnte nicht abgeschlossen werden. Bitte versuche es erneut.', response.status);
+  if (!response.ok) throw new ApiError(data.error || 'Das hat nicht geklappt. Bitte versuche es erneut.', response.status);
   return data as T;
 }

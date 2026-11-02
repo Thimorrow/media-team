@@ -1,5 +1,6 @@
 import { createServer } from 'node:http';
 import { openDatabase } from './db.mjs';
+import { ensureSundayServices, insertService } from './services.mjs';
 import { randomBytes, randomUUID, createHash, scrypt, timingSafeEqual } from 'node:crypto';
 import { promisify } from 'node:util';
 import { readFileSync, existsSync, statSync } from 'node:fs';
@@ -11,6 +12,8 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const hash = value => createHash('sha256').update(value).digest('hex');
 const token = () => randomBytes(32).toString('base64url');
 const sessionAge = 7 * 24 * 60 * 60 * 1000;
+// Older deployments read is_admin, so regular admins keep that legacy flag disabled.
+const canAdmin = user => user.access_level === 'admin' || user.access_level === 'superadmin';
 class HttpError extends Error { constructor(status, message) { super(message); this.status = status; } }
 const fail = (status, message) => { throw new HttpError(status, message); };
 
@@ -27,13 +30,18 @@ function text(value, name, max = 200) {
   if (typeof value !== 'string' || !value.trim() || value.trim().length > max) fail(400, `${name} fehlt oder ist zu lang.`);
   return value.trim();
 }
-function email(value) {
-  const result = text(value, 'E-Mail', 254).toLowerCase();
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(result)) fail(400, 'Bitte eine gültige E-Mail-Adresse angeben.');
-  return result;
+export function normalizeAccountName(value) {
+  if (typeof value !== 'string') fail(400, 'Bitte einen Namen angeben.');
+  const name = value.normalize('NFKC').trim().replace(/\s+/gu, ' ');
+  if (name.length < 2 || name.length > 80 || !/^[\p{L}\p{M}\p{N} ._'’\-]+$/u.test(name) || !/[\p{L}\p{N}]/u.test(name)) fail(400, 'Der Name muss 2 bis 80 Zeichen lang sein und darf keine E-Mail-Adresse sein.');
+  return { name, loginName: name.toLocaleLowerCase('de-DE') };
+}
+function accountConflict(error) {
+  if (error.code === '23505' || /UNIQUE constraint failed: users\.login_name/.test(error.message)) fail(409, 'Dieser Name ist bereits vergeben.');
+  throw error;
 }
 function password(value) {
-  if (typeof value !== 'string' || value.length < 12 || value.length > 256) fail(400, 'Das Passwort muss 12 bis 256 Zeichen lang sein.');
+  if (typeof value !== 'string' || value.length < 6 || value.length > 256) fail(400, 'Das Passwort muss 6 bis 256 Zeichen lang sein.');
   return value;
 }
 function boolean(value, name) {
@@ -99,27 +107,52 @@ function validateTemplates(value) {
   return { common, roles };
 }
 
-export async function createApp({ dbPath, databaseUrl, schema, setupToken, baseUrl, distPath = resolve(root, 'dist') } = {}) {
+export async function createApp({ dbPath, databaseUrl, schema, setupToken, baseUrl, distPath = resolve(root, 'dist'), now = () => new Date() } = {}) {
   const db = await openDatabase({ dbPath, databaseUrl, schema });
   if (db.kind === 'sqlite') await db.exec('PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;');
   const schemaSql = `
-    CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, name TEXT NOT NULL, email TEXT UNIQUE NOT NULL, password_hash TEXT NOT NULL, is_admin INTEGER NOT NULL DEFAULT 0, active INTEGER NOT NULL DEFAULT 1, roles TEXT NOT NULL DEFAULT '[]');
+    CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, name TEXT NOT NULL, login_name TEXT UNIQUE NOT NULL, password_hash TEXT NOT NULL, is_admin INTEGER NOT NULL DEFAULT 0, active INTEGER NOT NULL DEFAULT 1, roles TEXT NOT NULL DEFAULT '[]', access_level TEXT NOT NULL DEFAULT 'member' CHECK(access_level IN ('member','admin','superadmin') AND (access_level<>'superadmin' OR (is_admin=1 AND active=1))));
     CREATE TABLE IF NOT EXISTS sessions (token_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), expires_at INTEGER NOT NULL);
-    CREATE TABLE IF NOT EXISTS invites (token_hash TEXT PRIMARY KEY, email TEXT NOT NULL, is_admin INTEGER NOT NULL, roles TEXT NOT NULL, expires_at INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-    CREATE TABLE IF NOT EXISTS services (id TEXT PRIMARY KEY, title TEXT NOT NULL, starts_at TEXT NOT NULL, archived INTEGER NOT NULL DEFAULT 0);
+    CREATE TABLE IF NOT EXISTS services (id TEXT PRIMARY KEY, title TEXT NOT NULL, starts_at TEXT NOT NULL, meeting_at TEXT, archived INTEGER NOT NULL DEFAULT 0);
     CREATE TABLE IF NOT EXISTS participants (service_id TEXT NOT NULL REFERENCES services(id), user_id TEXT NOT NULL REFERENCES users(id), roles TEXT NOT NULL, PRIMARY KEY(service_id,user_id));
     CREATE TABLE IF NOT EXISTS tasks (id TEXT PRIMARY KEY, service_id TEXT NOT NULL REFERENCES services(id), owner_id TEXT REFERENCES users(id), title TEXT NOT NULL, details TEXT NOT NULL DEFAULT '', phase TEXT NOT NULL CHECK(phase IN ('before','after')), position INTEGER NOT NULL, done INTEGER NOT NULL DEFAULT 0, done_by TEXT REFERENCES users(id), revision INTEGER NOT NULL DEFAULT 0);
     CREATE INDEX IF NOT EXISTS tasks_service ON tasks(service_id);
     CREATE INDEX IF NOT EXISTS sessions_user ON sessions(user_id);
     CREATE TABLE IF NOT EXISTS rate_limits (key TEXT PRIMARY KEY, count INTEGER NOT NULL, reset_at BIGINT NOT NULL);`;
-  await db.transaction(async () => {
-    if (db.kind === 'postgres') await db.prepare('SELECT pg_advisory_xact_lock(741992)').get();
-    await db.exec(schemaSql.replace(/expires_at INTEGER/g, 'expires_at BIGINT'));
-  });
+  try {
+    await db.transaction(async () => {
+      if (db.kind === 'postgres') await db.prepare('SELECT pg_advisory_xact_lock(741992)').get();
+      await db.exec(schemaSql.replace(/expires_at INTEGER/g, 'expires_at BIGINT'));
+      const columns = db.kind === 'postgres'
+        ? (await db.prepare("SELECT column_name AS name FROM information_schema.columns WHERE table_schema=? AND table_name='users'").all(schema || 'media_team'))
+        : await db.prepare('PRAGMA table_info(users)').all();
+      if (columns.some(column => column.name === 'email')) {
+        const users = await db.prepare('SELECT id,name FROM users').all();
+        const names = users.map(user => ({ ...user, ...normalizeAccountName(user.name) }));
+        if (new Set(names.map(user => user.loginName)).size !== names.length) throw new Error('Die bestehenden Konten haben doppelte Namen. Bitte diese vor der Umstellung eindeutig benennen.');
+        await db.exec('ALTER TABLE users RENAME COLUMN email TO login_name');
+        for (const user of names) await db.prepare('UPDATE users SET name=?,login_name=? WHERE id=?').run(user.name, user.loginName, user.id);
+      }
+      if (!columns.some(column => column.name === 'access_level')) {
+        const admins = await db.prepare('SELECT id FROM users WHERE is_admin=1 AND active=1').all();
+        if (admins.length > 1 || (!admins.length && await db.prepare('SELECT 1 FROM users LIMIT 1').get())) throw new Error('Der Superadmin muss vor der Umstellung eindeutig festgelegt werden.');
+        await db.exec("ALTER TABLE users ADD COLUMN access_level TEXT NOT NULL DEFAULT 'member' CHECK(access_level IN ('member','admin','superadmin') AND (access_level<>'superadmin' OR (is_admin=1 AND active=1)))");
+        if (admins.length === 1) await db.prepare("UPDATE users SET access_level='superadmin' WHERE id=?").run(admins[0].id);
+      }
+      await db.exec("CREATE UNIQUE INDEX IF NOT EXISTS users_one_superadmin ON users(access_level) WHERE access_level='superadmin'");
+      const serviceColumns = db.kind === 'postgres'
+        ? await db.prepare("SELECT column_name AS name FROM information_schema.columns WHERE table_schema=? AND table_name='services'").all(schema || 'media_team')
+        : await db.prepare('PRAGMA table_info(services)').all();
+      if (!serviceColumns.some(column => column.name === 'meeting_at')) await db.exec('ALTER TABLE services ADD COLUMN meeting_at TEXT');
+    });
+  } catch (error) {
+    await db.close();
+    throw error;
+  }
   await db.prepare('INSERT INTO settings VALUES (?,?) ON CONFLICT (key) DO NOTHING').run('templates', JSON.stringify(initialTemplates()));
   const templates = async () => JSON.parse((await db.prepare('SELECT value FROM settings WHERE key=?').get('templates')).value);
-  const publicUser = row => ({ id: row.id, name: row.name, email: row.email, isAdmin: !!row.is_admin, roles: JSON.parse(row.roles) });
+  const publicUser = row => ({ id: row.id, name: row.name, isAdmin: canAdmin(row), isSuperadmin: row.access_level === 'superadmin', roles: JSON.parse(row.roles) });
   const roles = async value => {
     const current = await templates();
     if (!Array.isArray(value) || value.length > 30 || value.some(id => typeof id !== 'string' || !current.roles.some(role => role.id === id))) fail(400, 'Ungültiger Dienst.');
@@ -131,9 +164,18 @@ export async function createApp({ dbPath, databaseUrl, schema, setupToken, baseU
     return await db.prepare('SELECT users.* FROM sessions JOIN users ON users.id=sessions.user_id WHERE token_hash=? AND expires_at>? AND active=1').get(hash(raw), Date.now()) || null;
   };
   const requireUser = async req => await getUser(req) || fail(401, 'Bitte melde dich erneut an.');
-  const requireAdmin = async req => {
-    const user = await requireUser(req);
-    if (!user.is_admin) fail(403, 'Dafür brauchst du ein Admin-Konto.');
+  const requireAdmin = async (req, lock = false) => {
+    let user = await requireUser(req);
+    if (lock) {
+      await db.prepare('SELECT id FROM users WHERE id=?' + (db.kind === 'postgres' ? ' FOR UPDATE' : '')).get(user.id);
+      user = await requireUser(req);
+    }
+    if (!canAdmin(user)) fail(403, 'Dafür brauchst du ein Admin-Konto.');
+    return user;
+  };
+  const requireSuperadmin = async (req, lock = false) => {
+    const user = await requireAdmin(req, lock);
+    if (user.access_level !== 'superadmin') fail(403, 'Nur der Superadmin darf Konten und Rechte verwalten.');
     return user;
   };
   const cookie = (req, res, raw = '', maxAge = sessionAge / 1000) => {
@@ -155,7 +197,7 @@ export async function createApp({ dbPath, databaseUrl, schema, setupToken, baseU
   const canReadService = async (id, user) => {
     const service = await db.prepare('SELECT * FROM services WHERE id=?').get(id);
     if (!service) fail(404, 'Dieser Gottesdienst wurde nicht gefunden.');
-    if (!user.is_admin && !await db.prepare('SELECT 1 FROM participants WHERE service_id=? AND user_id=?').get(id, user.id)) fail(403, 'Du bist diesem Gottesdienst nicht zugeordnet.');
+    if (!canAdmin(user) && !await db.prepare('SELECT 1 FROM participants WHERE service_id=? AND user_id=?').get(id, user.id)) fail(403, 'Du bist diesem Gottesdienst nicht zugeordnet.');
     return service;
   };
   const taskShape = row => ({ id: row.id, title: row.title, details: row.details, phase: row.phase, done: !!row.done, doneBy: row.done_by_name || null, revision: row.revision });
@@ -194,25 +236,25 @@ export async function createApp({ dbPath, databaseUrl, schema, setupToken, baseU
       const value = await body(req);
       if (await db.prepare('SELECT 1 FROM users LIMIT 1').get()) fail(409, 'Die App ist bereits eingerichtet.');
       if (!setupToken || typeof value.token !== 'string' || hash(value.token) !== hash(setupToken)) fail(403, 'Der Einrichtungscode ist ungültig.');
-      const name = text(value.name, 'Name', 80), address = email(value.email), encoded = await hashPassword(password(value.password));
+      const { name, loginName } = normalizeAccountName(value.name), encoded = await hashPassword(password(value.password));
       const id = randomUUID();
       await transaction(async () => {
         if (db.kind === 'postgres') await db.prepare('SELECT pg_advisory_xact_lock(741993)').get();
         if (await db.prepare('SELECT 1 FROM users LIMIT 1').get()) fail(409, 'Die App ist bereits eingerichtet.');
-        await db.prepare('INSERT INTO users (id,name,email,password_hash,is_admin) VALUES (?,?,?,?,1)').run(id, name, address, encoded);
+        await db.prepare("INSERT INTO users (id,name,login_name,password_hash,is_admin,access_level) VALUES (?,?,?,?,1,'superadmin')").run(id, name, loginName, encoded);
       });
       await newSession(req, res, id);
       return json(res, 201, { user: publicUser(await db.prepare('SELECT * FROM users WHERE id=?').get(id)) });
     }
     if (method === 'POST' && path === '/api/login') {
-      const value = await body(req), address = email(value.email);
+      const value = await body(req), { loginName } = normalizeAccountName(value.name);
       await rateLimit(req, 'login', 200);
-      await rateLimit(req, `login:${hash(address)}`);
-      if (typeof value.password !== 'string' || value.password.length > 256) fail(401, 'E-Mail oder Passwort stimmen nicht.');
-      const user = await db.prepare('SELECT * FROM users WHERE email=? AND active=1').get(address);
+      await rateLimit(req, `login:${hash(loginName)}`);
+      if (typeof value.password !== 'string' || value.password.length > 256) fail(401, 'Name oder Passwort stimmen nicht.');
+      const user = await db.prepare('SELECT * FROM users WHERE login_name=? AND active=1').get(loginName);
       const dummy = '00000000000000000000000000000000:' + '0'.repeat(128);
       const valid = await passwordMatches(value.password, user?.password_hash || dummy);
-      if (!user || !valid) fail(401, 'E-Mail oder Passwort stimmen nicht.');
+      if (!user || !valid) fail(401, 'Name oder Passwort stimmen nicht.');
       const current = await newSession(req, res, user.id, user.password_hash);
       return json(res, 200, { user: publicUser(current) });
     }
@@ -236,35 +278,20 @@ export async function createApp({ dbPath, databaseUrl, schema, setupToken, baseU
       });
       return json(res, 200, {});
     }
-    const inviteMatch = path.match(/^\/api\/invites\/([A-Za-z0-9_-]{40,100})$/);
-    if (method === 'GET' && inviteMatch) {
-      const invite = await db.prepare('SELECT * FROM invites WHERE token_hash=? AND expires_at>?').get(hash(inviteMatch[1]), Date.now());
-      if (!invite) fail(404, 'Diese Einladung ist abgelaufen oder bereits verwendet.');
-      return json(res, 200, { email: invite.email, isAdmin: !!invite.is_admin, roles: JSON.parse(invite.roles), expiresAt: new Date(Number(invite.expires_at)).toISOString() });
-    }
-    if (method === 'POST' && path === '/api/join') {
-      await rateLimit(req, 'join');
-      const value = await body(req), raw = text(value.token, 'Einladung', 100);
-      const invite = await db.prepare('SELECT * FROM invites WHERE token_hash=? AND expires_at>?').get(hash(raw), Date.now());
-      if (!invite) fail(410, 'Diese Einladung ist abgelaufen oder bereits verwendet.');
-      const name = text(value.name, 'Name', 80), encoded = await hashPassword(password(value.password)), id = randomUUID();
-      await transaction(async () => {
-        const consumed = await db.prepare('DELETE FROM invites WHERE token_hash=? AND expires_at>? RETURNING *').get(hash(raw), Date.now());
-        if (!consumed) fail(410, 'Diese Einladung ist abgelaufen oder bereits verwendet.');
-        if (await db.prepare('SELECT 1 FROM users WHERE email=?').get(consumed.email)) fail(409, 'Für diese E-Mail besteht bereits ein Konto.');
-        await db.prepare('INSERT INTO users (id,name,email,password_hash,is_admin,roles) VALUES (?,?,?,?,?,?)').run(id, name, consumed.email, encoded, consumed.is_admin, consumed.roles);
-      });
-      await newSession(req, res, id);
-      return json(res, 201, { user: publicUser(await db.prepare('SELECT * FROM users WHERE id=?').get(id)) });
-    }
     if (method === 'GET' && path === '/api/app') {
       const user = await requireUser(req);
-      const rows = await db.prepare(user.is_admin ? 'SELECT * FROM services ORDER BY starts_at DESC' : 'SELECT services.* FROM services JOIN participants ON participants.service_id=services.id WHERE user_id=? ORDER BY starts_at DESC').all(...(user.is_admin ? [] : [user.id]));
-      const services = await Promise.all(rows.map(async service => {
-        const count = await db.prepare('SELECT COUNT(*) total,COALESCE(SUM(done),0) completed FROM tasks WHERE service_id=?' + (user.is_admin ? '' : ' AND (owner_id IS NULL OR owner_id=?)')).get(...(user.is_admin ? [service.id] : [service.id, user.id]));
-        return { id: service.id, title: service.title, startsAt: service.starts_at, archived: !!service.archived, ...count };
-      }));
-      const members = user.is_admin ? (await db.prepare('SELECT * FROM users ORDER BY name').all()).map(row => ({ ...publicUser(row), active: !!row.active })) : [];
+      await ensureSundayServices(db, now());
+      const rows = await db.prepare(canAdmin(user) ? 'SELECT * FROM services ORDER BY starts_at DESC' : 'SELECT services.* FROM services JOIN participants ON participants.service_id=services.id WHERE user_id=? ORDER BY starts_at DESC').all(...(canAdmin(user) ? [] : [user.id]));
+      const counts = await db.prepare(canAdmin(user)
+        ? 'SELECT service_id,COUNT(*) total,COALESCE(SUM(done),0) completed FROM tasks GROUP BY service_id'
+        : 'SELECT tasks.service_id,COUNT(*) total,COALESCE(SUM(tasks.done),0) completed FROM tasks JOIN participants ON participants.service_id=tasks.service_id WHERE participants.user_id=? AND (owner_id IS NULL OR owner_id=?) GROUP BY tasks.service_id'
+      ).all(...(canAdmin(user) ? [] : [user.id, user.id]));
+      const countsByService = new Map(counts.map(count => [count.service_id, count]));
+      const services = rows.map(service => {
+        const count = countsByService.get(service.id);
+        return { id: service.id, title: service.title, startsAt: service.starts_at, meetingAt: service.meeting_at, archived: !!service.archived, total: count?.total || 0, completed: count?.completed || 0 };
+      });
+      const members = canAdmin(user) ? (await db.prepare('SELECT * FROM users ORDER BY name').all()).map(row => ({ ...publicUser(row), active: !!row.active })) : [];
       return json(res, 200, { user: publicUser(user), services, roles: (await templates()).roles.map(({ id, title }) => ({ id, title })), members });
     }
     if (path === '/api/templates') {
@@ -272,33 +299,42 @@ export async function createApp({ dbPath, databaseUrl, schema, setupToken, baseU
       if (method === 'GET') return json(res, 200, await templates());
       if (method === 'PUT') {
         const value = validateTemplates(await body(req));
-        const usedRoles = (await db.prepare('SELECT roles FROM users UNION ALL SELECT roles FROM invites').all()).flatMap(row => JSON.parse(row.roles));
-        if (usedRoles.some(id => !value.roles.some(role => role.id === id))) fail(409, 'Ein zugewiesener Dienst kann nicht entfernt werden.');
-        await db.prepare('UPDATE settings SET value=? WHERE key=?').run(JSON.stringify(value), 'templates');
+        await transaction(async () => {
+          await requireAdmin(req, true);
+          const usedRoles = (await db.prepare('SELECT roles FROM users').all()).flatMap(row => JSON.parse(row.roles));
+          if (usedRoles.some(id => !value.roles.some(role => role.id === id))) fail(409, 'Ein zugewiesener Dienst kann nicht entfernt werden.');
+          await db.prepare('UPDATE settings SET value=? WHERE key=?').run(JSON.stringify(value), 'templates');
+        });
         return json(res, 200, {});
       }
     }
-    if (method === 'POST' && path === '/api/invites') {
-      await requireAdmin(req);
-      const value = await body(req), address = email(value.email), assigned = await roles(value.roles), isAdmin = boolean(value.isAdmin, 'Admin-Recht');
-      if (await db.prepare('SELECT 1 FROM users WHERE email=?').get(address)) fail(409, 'Für diese E-Mail besteht bereits ein Konto.');
-      const raw = token(), expiresAt = Date.now() + sessionAge;
-      await transaction(async () => {
-        await db.prepare('DELETE FROM invites WHERE email=? OR expires_at<=?').run(address, Date.now());
-        await db.prepare('INSERT INTO invites VALUES (?,?,?,?,?)').run(hash(raw), address, +isAdmin, JSON.stringify(assigned), expiresAt);
-      });
-      return json(res, 201, { token: raw, expiresAt: new Date(expiresAt).toISOString() });
+    if (method === 'POST' && path === '/api/members') {
+      await requireSuperadmin(req);
+      const value = await body(req), { name, loginName } = normalizeAccountName(value.name);
+      if ('isSuperadmin' in value || 'is_superadmin' in value || 'access_level' in value || 'accessLevel' in value) fail(400, 'Superadmin-Rechte können nicht über die Kontoverwaltung geändert werden.');
+      const assigned = await roles(value.roles), isAdmin = boolean(value.isAdmin, 'Admin-Recht');
+      const encoded = await hashPassword(password(value.password)), id = randomUUID();
+      try {
+        await transaction(async () => {
+          await requireSuperadmin(req, true);
+          await db.prepare('INSERT INTO users (id,name,login_name,password_hash,is_admin,access_level,roles) VALUES (?,?,?,?,0,?,?)').run(id, name, loginName, encoded, isAdmin ? 'admin' : 'member', JSON.stringify(assigned));
+        });
+      } catch (error) { accountConflict(error); }
+      return json(res, 201, { member: { ...publicUser(await db.prepare('SELECT * FROM users WHERE id=?').get(id)), active: true } });
     }
     const memberMatch = path.match(/^\/api\/members\/([^/]+)$/);
     if (method === 'PATCH' && memberMatch) {
-      await requireAdmin(req);
+      await requireSuperadmin(req);
       const value = await body(req), assigned = await roles(value.roles), isAdmin = boolean(value.isAdmin, 'Admin-Recht'), active = boolean(value.active, 'Aktiv');
+      if ('isSuperadmin' in value || 'is_superadmin' in value || 'access_level' in value || 'accessLevel' in value) fail(400, 'Superadmin-Rechte können nicht über die Kontoverwaltung geändert werden.');
       await transaction(async () => {
         if (db.kind === 'postgres') await db.prepare('SELECT pg_advisory_xact_lock(741993)').get();
+        await requireSuperadmin(req, true);
         const target = await db.prepare('SELECT * FROM users WHERE id=?').get(memberMatch[1]);
         if (!target) fail(404, 'Dieses Mitglied wurde nicht gefunden.');
-        if (target.is_admin && target.active && (!isAdmin || !active) && (await db.prepare('SELECT COUNT(*) n FROM users WHERE is_admin=1 AND active=1').get()).n <= 1) fail(409, 'Das letzte aktive Admin-Konto muss erhalten bleiben.');
-        await db.prepare('UPDATE users SET roles=?,is_admin=?,active=? WHERE id=?').run(JSON.stringify(assigned), +isAdmin, +active, target.id);
+        if (target.access_level === 'superadmin' && (!isAdmin || !active)) fail(409, 'Das Superadmin-Konto muss aktiv bleiben und seine Rechte behalten.');
+        const accessLevel = target.access_level === 'superadmin' ? 'superadmin' : isAdmin ? 'admin' : 'member';
+        await db.prepare('UPDATE users SET roles=?,is_admin=?,access_level=?,active=? WHERE id=?').run(JSON.stringify(assigned), +(accessLevel === 'superadmin'), accessLevel, +active, target.id);
         if (!active) await db.prepare('DELETE FROM sessions WHERE user_id=?').run(target.id);
       });
       return json(res, 200, {});
@@ -307,19 +343,18 @@ export async function createApp({ dbPath, databaseUrl, schema, setupToken, baseU
       await requireAdmin(req);
       const value = await body(req), title = text(value.title, 'Gottesdienst'), startsAt = new Date(value.startsAt);
       if (typeof value.startsAt !== 'string' || !Number.isFinite(startsAt.getTime())) fail(400, 'Bitte Datum und Uhrzeit angeben.');
+      let meetingAt = null;
+      if (value.meetingAt !== undefined && value.meetingAt !== null) {
+        const meeting = new Date(value.meetingAt);
+        if (typeof value.meetingAt !== 'string' || !Number.isFinite(meeting.getTime()) || meeting >= startsAt) fail(400, 'Die Media-Versammlung muss vor dem Gottesdienst beginnen.');
+        meetingAt = meeting.toISOString();
+      }
       if (!Array.isArray(value.memberIds) || value.memberIds.length > 300 || value.memberIds.some(id => typeof id !== 'string')) fail(400, 'Ungültige Teilnehmerliste.');
       const ids = [...new Set(value.memberIds)], participants = await Promise.all(ids.map(id => db.prepare('SELECT * FROM users WHERE id=? AND active=1').get(id)));
       if (participants.some(member => !member)) fail(400, 'Ein ausgewähltes Mitglied ist nicht verfügbar.');
       const id = randomUUID(), current = await templates();
       await transaction(async () => {
-        await db.prepare('INSERT INTO services (id,title,starts_at) VALUES (?,?,?)').run(id, title, startsAt.toISOString());
-        const insertTask = db.prepare('INSERT INTO tasks (id,service_id,owner_id,title,details,phase,position) VALUES (?,?,?,?,?,?,?)');
-        for (const [position, task] of current.common.entries()) await insertTask.run(randomUUID(), id, null, task.title, task.details, task.phase, position);
-        for (const member of participants) {
-          await db.prepare('INSERT INTO participants VALUES (?,?,?)').run(id, member.id, member.roles);
-          const personal = current.roles.filter(role => JSON.parse(member.roles).includes(role.id)).flatMap(role => role.tasks);
-          for (const [position, task] of personal.entries()) await insertTask.run(randomUUID(), id, member.id, task.title, task.details, task.phase, position);
-        }
+        await insertService(db, { id, title, startsAt: startsAt.toISOString(), meetingAt }, participants, current);
       });
       return json(res, 201, { id });
     }
@@ -327,10 +362,10 @@ export async function createApp({ dbPath, databaseUrl, schema, setupToken, baseU
     if (serviceMatch && method === 'GET') {
       const user = await requireUser(req), service = await canReadService(serviceMatch[1], user);
       const tasks = await db.prepare('SELECT tasks.*,users.name AS done_by_name FROM tasks LEFT JOIN users ON users.id=tasks.done_by WHERE service_id=? ORDER BY position,tasks.id').all(service.id);
-      const participants = await db.prepare('SELECT participants.*,users.name FROM participants JOIN users ON users.id=participants.user_id WHERE service_id=?' + (user.is_admin ? '' : ' AND user_id=?')).all(...(user.is_admin ? [service.id] : [service.id, user.id]));
+      const participants = await db.prepare('SELECT participants.*,users.name FROM participants JOIN users ON users.id=participants.user_id WHERE service_id=?' + (canAdmin(user) ? '' : ' AND user_id=?')).all(...(canAdmin(user) ? [service.id] : [service.id, user.id]));
       const common = tasks.filter(task => task.owner_id === null).map(taskShape);
       const personal = participants.map(member => ({ userId: member.user_id, name: member.name, roles: JSON.parse(member.roles), tasks: tasks.filter(task => task.owner_id === member.user_id).map(taskShape) }));
-      return json(res, 200, { id: service.id, title: service.title, startsAt: service.starts_at, archived: !!service.archived, common, personal });
+      return json(res, 200, { id: service.id, title: service.title, startsAt: service.starts_at, meetingAt: service.meeting_at, archived: !!service.archived, common, personal });
     }
     if (serviceMatch && method === 'PATCH') {
       const user = await requireAdmin(req), service = await canReadService(serviceMatch[1], user), value = await body(req);
@@ -348,7 +383,7 @@ export async function createApp({ dbPath, databaseUrl, schema, setupToken, baseU
         if (current.archived) fail(409, 'Dieser Gottesdienst ist archiviert.');
         const task = await db.prepare('SELECT * FROM tasks WHERE service_id=? AND id=?').get(service.id, taskMatch[2]);
         if (!task) fail(404, 'Diese Aufgabe wurde nicht gefunden.');
-        if (task.owner_id !== null && task.owner_id !== user.id && !user.is_admin) fail(403, 'Persönliche Aufgaben kann nur die zugeordnete Person abhaken.');
+        if (task.owner_id !== null && task.owner_id !== user.id && !canAdmin(user)) fail(403, 'Persönliche Aufgaben kann nur die zugeordnete Person abhaken.');
         const result = await db.prepare('UPDATE tasks SET done=?,done_by=?,revision=revision+1 WHERE id=? AND revision=?').run(+done, done ? user.id : null, task.id, value.revision);
         if (!result.changes) fail(409, 'Diese Aufgabe wurde gerade geändert. Der aktuelle Stand wird neu geladen.');
         return taskShape(await db.prepare('SELECT tasks.*,users.name AS done_by_name FROM tasks LEFT JOIN users ON users.id=tasks.done_by WHERE tasks.id=?').get(task.id));
@@ -391,7 +426,7 @@ export async function createApp({ dbPath, databaseUrl, schema, setupToken, baseU
     } catch (error) {
       if (res.headersSent) { res.end(); return; }
       if (!(error instanceof HttpError)) console.error('Request failed:', { name: error.name, code: error.code });
-      json(res, error.status || 500, { error: error instanceof HttpError ? error.message : 'Die Anfrage konnte nicht gespeichert werden. Bitte erneut versuchen.' });
+      json(res, error.status || 500, { error: error instanceof HttpError ? error.message : 'Das hat nicht geklappt. Bitte versuche es erneut.' });
     }
   };
   const server = createServer(handler);
@@ -415,6 +450,6 @@ export async function handleRequest(req, res) {
     deployedApp = undefined;
     console.error('Backend initialization failed:', { name: error.name, code: error.code });
     res.writeHead(503, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
-    res.end(JSON.stringify({ error: 'Die Datenbankverbindung ist noch nicht eingerichtet. Bitte wende dich an die Administration.' }));
+    res.end(JSON.stringify({ error: 'Die Datenbankverbindung ist noch nicht eingerichtet. Frag bitte Thimofej.' }));
   }
 }

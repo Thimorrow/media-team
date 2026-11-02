@@ -1,7 +1,7 @@
-import { useEffect, useState, type FormEvent } from 'react';
-import { ArrowLeft, Check, Copy, Plus, Settings2, ShieldCheck, Trash2, UserPlus, Users } from 'lucide-react';
+import { useEffect, useId, useRef, useState, type FormEvent } from 'react';
+import { ArrowLeft, Check, CircleAlert, Plus, Settings2, ShieldCheck, Trash2, UserPlus, Users } from 'lucide-react';
 import { api } from './api';
-import { Chevron, Dialog, Empty, ErrorNotice } from './components';
+import { Chevron, Dialog, Empty, ErrorNotice, PasswordInput, useDialogDismiss } from './components';
 import { initials, type AppData, type Member, type Phase, type ServiceDetail, type Templates, type TemplateTask } from './types';
 
 type Changed = () => Promise<void>;
@@ -11,27 +11,28 @@ function RoleFields({ roles, selected, setSelected }: { roles: AppData['roles'];
 }
 
 export function CreateService({ data, onClose, onChanged, onCreated }: { data: AppData; onClose: () => void; onChanged: Changed; onCreated: (id: string) => void }) {
+  const { dialogRef, dismiss } = useDialogDismiss();
   const [title, setTitle] = useState('Sonntagsgottesdienst');
   const [startsAt, setStartsAt] = useState('');
   const [members, setMembers] = useState(data.members.filter(m => m.active).map(m => m.id));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   async function submit(e: FormEvent) {
-    e.preventDefault(); setBusy(true); setError('');
+    e.preventDefault(); if (busy) return; setBusy(true); setError('');
     try {
       const iso = berlinTimeToISO(startsAt);
       const result = await api<{ id: string }>('/services', { title, startsAt: iso, memberIds: members });
-      await onChanged(); onCreated(result.id); onClose();
+      await onChanged(); if (dialogRef.current?.open && dialogRef.current.dataset.closing !== 'true') { onCreated(result.id); dismiss(); }
     } catch (e) { setError((e as Error).message); } finally { setBusy(false); }
   }
-  return <Dialog title="Gottesdienst anlegen" onClose={onClose}><form onSubmit={submit} className="form-stack">
+  return <Dialog ref={dialogRef} title="Gottesdienst anlegen" onClose={onClose}><form onSubmit={submit} aria-busy={busy}><fieldset className="form-stack field-group" disabled={busy}>
     <label>Titel<input value={title} onChange={e => setTitle(e.target.value)} required maxLength={120} /></label>
     <label>Datum und Uhrzeit · Berlin<input type="datetime-local" value={startsAt} onChange={e => setStartsAt(e.target.value)} required /></label>
     <fieldset className="field-group"><legend>Wer ist dabei?</legend><div className="choice-list member-choices">{data.members.filter(m => m.active).map(member => <label key={member.id} className="choice"><input type="checkbox" checked={members.includes(member.id)} onChange={e => setMembers(e.target.checked ? [...members, member.id] : members.filter(id => id !== member.id))} /><span>{member.name}</span></label>)}</div></fieldset>
     {members.length === 0 && <p className="muted small">Wähle mindestens ein Teammitglied.</p>}
     {error && <ErrorNotice message={error} />}
     <button className="button primary full" disabled={busy || !members.length}>{busy ? 'Wird angelegt…' : 'Gottesdienst anlegen'}<Plus size={18} /></button>
-  </form></Dialog>;
+  </fieldset></form></Dialog>;
 }
 
 function berlinTimeToISO(value: string) {
@@ -50,47 +51,86 @@ function berlinTimeToISO(value: string) {
 }
 
 export function TeamPage({ data, onChanged, onTemplates }: { data: AppData; onChanged: Changed; onTemplates: () => void }) {
-  const [modal, setModal] = useState<'invite' | Member | null>(null);
-  return <><div className="page-heading"><div><p className="eyebrow">Verwaltung</p><h1>Dein Team<span className="heading-dot">.</span></h1></div><button className="button primary" onClick={() => setModal('invite')}><UserPlus size={18} />Einladen</button></div>
+  const [modal, setModal] = useState<'create' | Member | null>(null);
+  const canManage = data.user.isSuperadmin;
+  return <><div className="page-heading"><div><p className="eyebrow">Verwaltung</p><h1>Dein Team</h1></div>{canManage && <button className="button primary" onClick={() => setModal('create')}><UserPlus size={18} />Mitglied anlegen</button>}</div>
     <div className="section-heading"><h2>Mitglieder <span className="count">{data.members.filter(m => m.active).length}</span></h2><button className="text-button" onClick={onTemplates}><Settings2 size={17} />Vorlagen</button></div>
-    <div className="card members-list">{data.members.map(member => <button key={member.id} className={`member-row ${!member.active ? 'member-inactive' : ''}`} onClick={() => setModal(member)}><span className="avatar">{initials(member.name)}</span><span className="member-copy"><strong>{member.name}</strong><span>{!member.active ? 'Deaktiviert' : member.roles.map(id => data.roles.find(r => r.id === id)?.title).filter(Boolean).join(' · ') || 'Noch kein Dienst'}</span></span>{member.isAdmin && <ShieldCheck size={17} className="muted" aria-label="Admin" />}<Chevron /></button>)}</div>
-    {modal === 'invite' && <InviteForm data={data} onClose={() => setModal(null)} />}
-    {typeof modal === 'object' && modal && <EditMember data={data} member={modal} onChanged={onChanged} onClose={() => setModal(null)} />}
+    <div className="card members-list">{data.members.map(member => {
+      const content = <><span className="avatar">{initials(member.name)}</span><span className="member-copy"><strong>{member.name}</strong><span>{!member.active ? 'Deaktiviert' : member.roles.map(id => data.roles.find(r => r.id === id)?.title).filter(Boolean).join(' · ') || (member.isAdmin ? '' : 'Noch kein Dienst')}</span></span>{member.isAdmin && <span className="badge"><ShieldCheck size={14} />{member.isSuperadmin ? 'Superadmin' : 'Admin'}</span>}{canManage && <Chevron />}</>;
+      const className = `member-row ${!member.active ? 'member-inactive' : ''}`;
+      return canManage ? <button key={member.id} className={className} onClick={() => setModal(member)}>{content}</button> : <div key={member.id} className={className}>{content}</div>;
+    })}</div>
+    {canManage && modal === 'create' && <CreateMemberForm data={data} onChanged={onChanged} onClose={() => setModal(null)} />}
+    {canManage && typeof modal === 'object' && modal && <EditMember data={data} member={modal} onChanged={onChanged} onClose={() => setModal(null)} />}
   </>;
 }
 
-function InviteForm({ data, onClose }: { data: AppData; onClose: () => void }) {
-  const [email, setEmail] = useState(''); const [roles, setRoles] = useState<string[]>([]); const [isAdmin, setIsAdmin] = useState(false);
-  const [busy, setBusy] = useState(false); const [error, setError] = useState(''); const [link, setLink] = useState(''); const [copied, setCopied] = useState(false);
+function CreateMemberForm({ data, onChanged, onClose }: { data: AppData; onChanged: Changed; onClose: () => void }) {
+  const { dialogRef, dismiss } = useDialogDismiss();
+  const [name, setName] = useState(''); const [password, setPassword] = useState(''); const [roles, setRoles] = useState<string[]>([]); const [isAdmin, setIsAdmin] = useState(false);
+  const [busy, setBusy] = useState(false); const [error, setError] = useState('');
   async function submit(e: FormEvent) {
-    e.preventDefault(); setBusy(true); setError('');
-    try { const result = await api<{ token: string }>('/invites', { email, roles, isAdmin }); setLink(`${location.origin}/#invite=${encodeURIComponent(result.token)}`); } catch (e) { setError((e as Error).message); } finally { setBusy(false); }
+    e.preventDefault(); if (busy) return; setBusy(true); setError('');
+    try { await api('/members', { name, password, roles, isAdmin }); await onChanged(); dismiss(); }
+    catch (e) { setError((e as Error).message); } finally { setBusy(false); }
   }
-  async function copy() { try { await navigator.clipboard.writeText(link); setCopied(true); } catch { setError('Kopieren ist hier nicht möglich. Du kannst den Link im Feld auswählen und kopieren.'); } }
-  return <Dialog title={link ? 'Einladung ist bereit' : 'Mitglied einladen'} onClose={onClose}>{link ? <div className="form-stack"><div className="invite-success"><Check size={28} /><p>Für {email}</p></div><label>Einladungslink<input value={link} readOnly onFocus={e => e.currentTarget.select()} /></label><p className="muted small">Der Link ist 7 Tage gültig und kann einmal verwendet werden. Teile ihn direkt mit der Person.</p><button className="button primary full" onClick={copy}>{copied ? <Check size={18} /> : <Copy size={18} />}{copied ? 'Link kopiert' : 'Link kopieren'}</button>{error && <ErrorNotice message={error} />}</div> : <form onSubmit={submit} className="form-stack"><label>E-Mail<input type="email" value={email} onChange={e => setEmail(e.target.value)} autoComplete="email" autoCapitalize="none" required /></label><RoleFields roles={data.roles} selected={roles} setSelected={setRoles} /><label className="choice standalone-choice"><input type="checkbox" checked={isAdmin} onChange={e => setIsAdmin(e.target.checked)} /><span>Admin-Rechte</span></label>{error && <ErrorNotice message={error} />}<button className="button primary full" disabled={busy}>{busy ? 'Wird erstellt…' : 'Einladungslink erstellen'}<UserPlus size={18} /></button></form>}</Dialog>;
+  return <Dialog ref={dialogRef} title="Mitglied anlegen" onClose={onClose}><form onSubmit={submit} aria-busy={busy}><fieldset className="form-stack field-group" disabled={busy}><label>Name<input name="name" value={name} onChange={e => setName(e.target.value)} autoComplete="off" autoCapitalize="none" autoCorrect="off" maxLength={80} required /></label><label>Startpasswort<PasswordInput aria-label="Startpasswort" name="password" value={password} onChange={e => setPassword(e.target.value)} autoComplete="new-password" minLength={6} maxLength={256} required /><small>Mindestens 6 Zeichen</small></label><RoleFields roles={data.roles} selected={roles} setSelected={setRoles} /><label className="choice standalone-choice"><input type="checkbox" checked={isAdmin} onChange={e => setIsAdmin(e.target.checked)} /><span>Admin-Rechte</span></label>{error && <ErrorNotice message={error} />}<button className="button primary full" disabled={busy}>{busy ? 'Wird angelegt…' : 'Mitglied anlegen'}<UserPlus size={18} /></button></fieldset></form></Dialog>;
 }
 
 function EditMember({ data, member, onChanged, onClose }: { data: AppData; member: Member; onChanged: Changed; onClose: () => void }) {
+  const { dialogRef, dismiss } = useDialogDismiss();
   const [roles, setRoles] = useState(member.roles); const [isAdmin, setIsAdmin] = useState(member.isAdmin); const [active, setActive] = useState(member.active);
   const [busy, setBusy] = useState(false); const [error, setError] = useState('');
-  async function submit(e: FormEvent) { e.preventDefault(); setBusy(true); setError(''); try { await api(`/members/${member.id}`, { roles, isAdmin, active }, 'PATCH'); await onChanged(); onClose(); } catch (e) { setError((e as Error).message); } finally { setBusy(false); } }
-  return <Dialog title={member.name} onClose={onClose}><form onSubmit={submit} className="form-stack"><p className="muted small">{member.email}</p><RoleFields roles={data.roles} selected={roles} setSelected={setRoles} /><p className="muted small">Die Dienstauswahl gilt für neue Gottesdienste. Bereits angelegte Aufgaben bleiben erhalten.</p><label className="choice standalone-choice"><input type="checkbox" checked={isAdmin} onChange={e => setIsAdmin(e.target.checked)} /><span>Admin-Rechte</span></label><label className="choice standalone-choice"><input type="checkbox" checked={active} onChange={e => setActive(e.target.checked)} /><span>Konto aktiv</span></label>{error && <ErrorNotice message={error} />}<button className="button primary full" disabled={busy}>{busy ? 'Wird gespeichert…' : 'Änderungen speichern'}<Check size={18} /></button></form></Dialog>;
+  async function submit(e: FormEvent) { e.preventDefault(); if (busy) return; setBusy(true); setError(''); try { await api(`/members/${member.id}`, { roles, isAdmin, active }, 'PATCH'); await onChanged(); dismiss(); } catch (e) { setError((e as Error).message); } finally { setBusy(false); } }
+  return <Dialog ref={dialogRef} title={member.name} onClose={onClose}><form onSubmit={submit} aria-busy={busy}><fieldset className="form-stack field-group" disabled={busy}><RoleFields roles={data.roles} selected={roles} setSelected={setRoles} /><p className="muted small">Die Dienstauswahl gilt für neue Gottesdienste. Bereits angelegte Aufgaben bleiben erhalten.</p>{member.isSuperadmin ? <span className="badge"><ShieldCheck size={14} />Superadmin</span> : <><label className="choice standalone-choice"><input type="checkbox" checked={isAdmin} onChange={e => setIsAdmin(e.target.checked)} /><span>Admin-Rechte</span></label><label className="choice standalone-choice"><input type="checkbox" checked={active} onChange={e => setActive(e.target.checked)} /><span>Konto aktiv</span></label></>}{error && <ErrorNotice message={error} />}<button className="button primary full" disabled={busy}>{busy ? 'Wird gespeichert…' : 'Änderungen speichern'}<Check size={18} /></button></fieldset></form></Dialog>;
 }
 
-export function PersonalTaskForm({ detail, onChanged, onClose }: { detail: ServiceDetail; onChanged: Changed; onClose: () => void }) {
-  const [title, setTitle] = useState(''); const [userId, setUserId] = useState(detail.personal[0]?.userId || ''); const [phase, setPhase] = useState<Phase>('before');
+export function PersonalTaskForm({ detail, initialUserId, onChanged, onClose }: { detail: ServiceDetail; initialUserId: string; onChanged: Changed; onClose: () => void }) {
+  const { dialogRef, dismiss } = useDialogDismiss();
+  const [title, setTitle] = useState(''); const [userId, setUserId] = useState(detail.personal.some(person => person.userId === initialUserId) ? initialUserId : detail.personal[0]?.userId || ''); const [phase, setPhase] = useState<Phase>('before');
   const [busy, setBusy] = useState(false); const [error, setError] = useState('');
-  async function submit(e: FormEvent) { e.preventDefault(); setBusy(true); setError(''); try { await api(`/services/${detail.id}/personal-tasks`, { userId, title, phase }); await onChanged(); onClose(); } catch (e) { setError((e as Error).message); } finally { setBusy(false); } }
-  return <Dialog title="Persönliche Aufgabe" onClose={onClose}><form onSubmit={submit} className="form-stack"><label>Für wen?<select value={userId} onChange={e => setUserId(e.target.value)} required>{detail.personal.map(p => <option value={p.userId} key={p.userId}>{p.name}</option>)}</select></label><label>Aufgabe<input value={title} onChange={e => setTitle(e.target.value)} required maxLength={240} /></label><label>Zeitpunkt<select value={phase} onChange={e => setPhase(e.target.value as Phase)}><option value="before">Vor dem Dienst</option><option value="after">Nach dem Dienst</option></select></label>{error && <ErrorNotice message={error} />}<button className="button primary full" disabled={busy || !userId}>{busy ? 'Wird hinzugefügt…' : 'Aufgabe hinzufügen'}<Plus size={18} /></button></form></Dialog>;
+  async function submit(e: FormEvent) { e.preventDefault(); if (busy) return; setBusy(true); setError(''); try { await api(`/services/${detail.id}/personal-tasks`, { userId, title, phase }); await onChanged(); dismiss(); } catch (e) { setError((e as Error).message); } finally { setBusy(false); } }
+  return <Dialog ref={dialogRef} title="Persönliche Aufgabe" onClose={onClose}><form onSubmit={submit} aria-busy={busy}><fieldset className="form-stack field-group" disabled={busy}><label>Für wen?<select value={userId} onChange={e => setUserId(e.target.value)} required>{detail.personal.map(p => <option value={p.userId} key={p.userId}>{p.name}</option>)}</select></label><label>Aufgabe<input value={title} onChange={e => setTitle(e.target.value)} required maxLength={240} /></label><label>Zeitpunkt<select value={phase} onChange={e => setPhase(e.target.value as Phase)}><option value="before">Vor dem Dienst</option><option value="after">Nach dem Dienst</option></select></label>{error && <ErrorNotice message={error} />}<button className="button primary full" disabled={busy || !userId}>{busy ? 'Wird hinzugefügt…' : 'Aufgabe hinzufügen'}<Plus size={18} /></button></fieldset></form></Dialog>;
 }
 
-export function TemplatesPage({ onBack }: { onBack: () => void }) {
+export function TemplatesPage({ onBack, onDirtyChange, onBusyChange }: { onBack: () => void; onDirtyChange: (dirty: boolean) => void; onBusyChange: (busy: boolean) => void }) {
   const [data, setData] = useState<Templates | null>(null); const [selection, setSelection] = useState('common'); const [phase, setPhase] = useState<Phase>('before');
   const [error, setError] = useState(''); const [busy, setBusy] = useState(false); const [saved, setSaved] = useState(false);
+  const [dirty, setDirty] = useState(false);
+  useEffect(() => {
+    onDirtyChange(dirty);
+    if (!dirty) return;
+    const warn = (event: BeforeUnloadEvent) => { event.preventDefault(); };
+    window.addEventListener('beforeunload', warn);
+    return () => window.removeEventListener('beforeunload', warn);
+  }, [dirty, onDirtyChange]);
+  const [removing, setRemoving] = useState<TemplateTask | null>(null);
+  const { dialogRef: removalDialogRef, dismiss: dismissRemoval } = useDialogDismiss();
+  const removedRef = useRef(false);
+  const formRef = useRef<HTMLFormElement>(null);
+  const addRef = useRef<HTMLButtonElement>(null);
+  const [invalidTaskId, setInvalidTaskId] = useState<string | null>(null);
+  const invalidInputRef = useRef<HTMLInputElement>(null);
+  const fieldErrorId = useId();
   async function load() { setError(''); try { setData(await api<Templates>('/templates')); } catch (e) { setError((e as Error).message); } }
   useEffect(() => { void load(); }, []);
-  function updateTasks(change: (tasks: TemplateTask[]) => TemplateTask[]) { setSaved(false); setData(current => !current ? current : selection === 'common' ? { ...current, common: change(current.common) } : { ...current, roles: current.roles.map(r => r.id === selection ? { ...r, tasks: change(r.tasks) } : r) }); }
-  async function save() { setBusy(true); setError(''); try { await api('/templates', data, 'PUT'); setSaved(true); } catch (e) { setError((e as Error).message); } finally { setBusy(false); } }
+  function updateTasks(change: (tasks: TemplateTask[]) => TemplateTask[]) { setDirty(true); setSaved(false); setData(current => !current ? current : selection === 'common' ? { ...current, common: change(current.common) } : { ...current, roles: current.roles.map(r => r.id === selection ? { ...r, tasks: change(r.tasks) } : r) }); }
+  async function save(e: FormEvent) {
+    e.preventDefault(); if (busy || !data) return;
+    setError('');
+    for (const group of [{ id: 'common', tasks: data.common }, ...data.roles]) {
+      const invalid = group.tasks.find(task => !task.title.trim());
+      if (invalid) {
+        setSaved(false); setSelection(group.id); setPhase(invalid.phase); setInvalidTaskId(invalid.id);
+        requestAnimationFrame(() => invalidInputRef.current?.focus());
+        return;
+      }
+    }
+    setInvalidTaskId(null); setBusy(true); onBusyChange(true);
+    try { await api('/templates', data, 'PUT'); setDirty(false); setSaved(true); }
+    catch (e) { setError((e as Error).message); }
+    finally { setBusy(false); onBusyChange(false); }
+  }
   const tasks = data ? selection === 'common' ? data.common : data.roles.find(r => r.id === selection)?.tasks || [] : [];
-  return <><button className="text-button back-button" onClick={onBack}><ArrowLeft size={17} />Team</button><div className="page-heading"><div><p className="eyebrow">Verwaltung</p><h1>Vorlagen<span className="heading-dot">.</span></h1></div>{data && <button className="button primary" disabled={busy} onClick={save}>{saved ? <Check size={18} /> : <Settings2 size={18} />}{busy ? 'Speichert…' : saved ? 'Gespeichert' : 'Speichern'}</button>}</div><p className="page-intro">Änderungen gelten für neue Gottesdienste.</p>{error && <ErrorNotice message={error} retry={data ? undefined : load} />}{!data && !error && <div className="skeleton card" />}{data && <><div className="template-select"><label className="sr-only" htmlFor="template-role">Vorlage</label><select id="template-role" value={selection} onChange={e => setSelection(e.target.value)}><option value="common">Gemeinsame Aufgaben</option>{data.roles.map(r => <option key={r.id} value={r.id}>{r.title}</option>)}</select><div className="phase-switch" aria-label="Zeitpunkt">{(['before', 'after'] as const).map(value => <button key={value} aria-pressed={phase === value} onClick={() => setPhase(value)} className={phase === value ? 'active' : ''}>{value === 'before' ? 'Vor dem Dienst' : 'Nach dem Dienst'}</button>)}</div></div><div className="card template-list">{tasks.filter(t => t.phase === phase).map((task, index) => <div className="template-task" key={task.id}><span className="template-number">{String(index + 1).padStart(2, '0')}</span><div className="template-fields"><label><span className="sr-only">Aufgabe {index + 1}</span><input value={task.title} maxLength={240} required onChange={e => updateTasks(tasks => tasks.map(t => t.id === task.id ? { ...t, title: e.target.value } : t))} /></label><label><span className="sr-only">Details für Aufgabe {index + 1}</span><textarea rows={2} value={task.details || ''} placeholder="Details, falls nötig" maxLength={1000} onChange={e => updateTasks(tasks => tasks.map(t => t.id === task.id ? { ...t, details: e.target.value } : t))} /></label></div><button className="icon-button delete-button" aria-label={`Aufgabe ${index + 1} entfernen`} onClick={() => updateTasks(tasks => tasks.filter(t => t.id !== task.id))}><Trash2 size={18} /></button></div>)}{!tasks.some(t => t.phase === phase) && <Empty icon={<Users size={25} />} title="Noch keine Aufgaben" />}<button className="template-add" onClick={() => updateTasks(tasks => [...tasks, { id: crypto.randomUUID(), title: '', details: '', phase }])}><Plus size={18} />Aufgabe hinzufügen</button></div></>}</>;
+  return <><button className="text-button back-button" disabled={busy} onClick={onBack}><ArrowLeft size={17} />Team</button><div className="page-heading"><div><p className="eyebrow">Verwaltung</p><h1>Vorlagen</h1></div>{data && <button className="button primary save-templates" type="submit" form="templates-form" disabled={busy}>{saved ? <Check size={18} /> : <Settings2 size={18} />}{busy ? 'Speichert…' : saved ? 'Gespeichert' : 'Speichern'}</button>}</div><p className="page-intro">Änderungen gelten für neue Gottesdienste.</p>{error && <ErrorNotice message={error} retry={data ? undefined : load} />}{!data && !error && <div className="skeleton card" role="status" aria-label="Vorlagen werden geladen" />}{data && <form id="templates-form" ref={formRef} onSubmit={save} onKeyDown={e => { if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); formRef.current?.requestSubmit(); } }}><fieldset className="template-editor" disabled={busy}><div className="template-select"><label className="sr-only" htmlFor="template-role">Vorlage</label><select id="template-role" value={selection} onChange={e => setSelection(e.target.value)}><option value="common">Gemeinsame Aufgaben</option>{data.roles.map(r => <option key={r.id} value={r.id}>{r.title}</option>)}</select><div className="phase-switch" role="group" aria-label="Zeitpunkt">{(['before', 'after'] as const).map(value => <button type="button" key={value} aria-pressed={phase === value} onClick={() => setPhase(value)} className={phase === value ? 'active' : ''}>{value === 'before' ? 'Vor dem Dienst' : 'Nach dem Dienst'}</button>)}</div></div><div className="card template-list">{tasks.filter(t => t.phase === phase).map((task, index) => <div className="template-task" key={task.id}><span className="template-number">{String(index + 1).padStart(2, '0')}</span><div className="template-fields"><label><span className="sr-only">Aufgabe {index + 1}</span><input ref={invalidTaskId === task.id ? invalidInputRef : undefined} value={task.title} maxLength={240} required aria-invalid={invalidTaskId === task.id || undefined} aria-describedby={invalidTaskId === task.id ? fieldErrorId : undefined} onChange={e => { const title = e.target.value; updateTasks(tasks => tasks.map(t => t.id === task.id ? { ...t, title } : t)); if (invalidTaskId === task.id && title.trim()) setInvalidTaskId(null); }} /></label>{invalidTaskId === task.id && <span className="field-error" id={fieldErrorId} role="alert"><CircleAlert size={16} aria-hidden="true" /><span>Gib dieser Aufgabe einen Titel.</span></span>}<label><span className="sr-only">Details für Aufgabe {index + 1}</span><textarea rows={2} value={task.details || ''} placeholder="Details, falls nötig" maxLength={1000} onChange={e => updateTasks(tasks => tasks.map(t => t.id === task.id ? { ...t, details: e.target.value } : t))} /></label></div><button className="icon-button delete-button" type="button" aria-label={`Aufgabe ${index + 1} entfernen`} onClick={() => { removedRef.current = false; setRemoving(task); }}><Trash2 size={18} /></button></div>)}{!tasks.some(t => t.phase === phase) && <Empty icon={<Users size={25} />} title="Noch keine Aufgaben" />}<button className="template-add" ref={addRef} type="button" onClick={() => updateTasks(tasks => [...tasks, { id: crypto.randomUUID(), title: '', details: '', phase }])}><Plus size={18} />Aufgabe hinzufügen</button></div></fieldset><div className="sr-only" role="status">{saved ? 'Vorlagen gespeichert.' : ''}</div></form>}{removing && <Dialog ref={removalDialogRef} title="Aufgabe entfernen?" onClose={() => { setRemoving(null); if (removedRef.current) requestAnimationFrame(() => addRef.current?.focus()); }}><div className="form-stack"><p>„{removing.title || 'Neue Aufgabe'}“ wird aus der Vorlage entfernt. Bereits angelegte Gottesdienste bleiben unverändert.</p><button className="button secondary full" onClick={dismissRemoval}>Behalten</button><button className="button danger full" onClick={() => { updateTasks(tasks => tasks.filter(t => t.id !== removing.id)); removedRef.current = true; dismissRemoval(); }}>Aufgabe entfernen<Trash2 size={18} /></button></div></Dialog>}</>;
 }

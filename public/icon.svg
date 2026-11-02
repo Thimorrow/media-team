@@ -1,9 +1,9 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
-  <rect width="512" height="512" rx="112" fill="#225541"/>
-  <g fill="#f5f5f0">
+  <rect width="512" height="512" rx="112" fill="oklch(0.235 0.025 325)"/>
+  <g fill="oklch(0.985 0.005 65)">
     <rect x="108" y="202" width="52" height="108" rx="26"/>
     <rect x="189" y="130" width="52" height="252" rx="26"/>
     <rect x="270" y="165" width="52" height="182" rx="26"/>
   </g>
-  <rect x="351" y="215" width="52" height="82" rx="26" fill="#c7ee78"/>
+  <rect x="351" y="215" width="52" height="82" rx="26" fill="oklch(0.86 0.085 55)"/>
 </svg>

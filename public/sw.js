@@ -1,4 +1,4 @@
-const CACHE_NAME = 'media-team-v1';
+const CACHE_NAME = 'media-team-v2';
 const STATIC_FILES = [
   '/offline.html', '/manifest.webmanifest', '/icon.svg', '/icon-192.png',
   '/icon-512.png', '/icon-maskable-512.png', '/apple-touch-icon.png'

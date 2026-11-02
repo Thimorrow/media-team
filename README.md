@@ -1,10 +1,10 @@
 # Media Team
 
-[Aktueller Quellstand](https://github.com/Thimorrow/media-team/tree/codex/preview/media-team) · [Geprüfte Vercel-Vorschau](https://media-team-6hrxft4gg-zapkothimofej-2616s-projects.vercel.app)
+[Repository](https://github.com/Thimorrow/media-team) · [Online-App](https://media-team-lemon.vercel.app)
 
 Media Team organisiert Aufgaben für Gottesdienste. Allgemeine Aufgaben werden gemeinsam abgehakt; persönliche Aufgaben gehören jeweils zu einer Person und Rolle. Für jeden Gottesdienst entsteht eine eigene Liste, abgeschlossene Dienste können ins Archiv.
 
-Admins erstellen Einladungslinks und geben sie selbst weiter. Die App verschickt keine E-Mails. Änderungen an Vorlagen und Mitgliedsrollen gelten für zukünftige Termine beziehungsweise Dienste.
+Die Anmeldung verwendet ausschließlich Name und Passwort. Der Superadmin legt Mitglieder direkt mit Name und Startpasswort an und verwaltet ihre Rechte. Admins bearbeiten Checklisten und Gottesdienste. Es werden keine E-Mail-Adressen benötigt und keine E-Mails verschickt. Änderungen an Vorlagen und Mitgliedsrollen gelten für zukünftige Termine beziehungsweise Dienste.
 
 ## Lokal starten
 
@@ -16,7 +16,7 @@ npm run build
 npm start
 ```
 
-Die App läuft unter [localhost:3000](http://localhost:3000). Beim ersten Start wird im Terminal ein Link zur Einrichtung des ersten Admin-Kontos ausgegeben. Lokale Daten liegen in `.local/`.
+Die App läuft unter [localhost:3000](http://localhost:3000). Beim ersten Start wird im Terminal ein Link zur Einrichtung des Superadmin-Kontos ausgegeben. Lokale Daten liegen in `.local/`.
 
 Für die Entwicklung startet `npm run dev` die Oberfläche auf Port 5173 und die API auf Port 3001. `npm run demo` startet eine lokale Demo mit Beispieldaten in der getrennten Datei `.local/demo.sqlite`; die Zugangsdaten stehen im Terminal. Es gibt keine Cloud-Demo.
 
