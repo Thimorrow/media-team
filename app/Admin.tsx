@@ -1,5 +1,5 @@
 import { useEffect, useState, type FormEvent } from 'react';
-import { ArrowLeft, Check, Copy, Plus, Settings2, ShieldCheck, Trash2, UserPlus, Users } from 'lucide-react';
+import { ArrowLeft, Check, Plus, Settings2, ShieldCheck, Trash2, UserPlus, Users } from 'lucide-react';
 import { api } from './api';
 import { Chevron, Dialog, Empty, ErrorNotice } from './components';
 import { initials, type AppData, type Member, type Phase, type ServiceDetail, type Templates, type TemplateTask } from './types';
@@ -50,31 +50,30 @@ function berlinTimeToISO(value: string) {
 }
 
 export function TeamPage({ data, onChanged, onTemplates }: { data: AppData; onChanged: Changed; onTemplates: () => void }) {
-  const [modal, setModal] = useState<'invite' | Member | null>(null);
-  return <><div className="page-heading"><div><p className="eyebrow">Verwaltung</p><h1>Dein Team<span className="heading-dot">.</span></h1></div><button className="button primary" onClick={() => setModal('invite')}><UserPlus size={18} />Einladen</button></div>
+  const [modal, setModal] = useState<'create' | Member | null>(null);
+  return <><div className="page-heading"><div><p className="eyebrow">Verwaltung</p><h1>Dein Team<span className="heading-dot">.</span></h1></div><button className="button primary" onClick={() => setModal('create')}><UserPlus size={18} />Mitglied anlegen</button></div>
     <div className="section-heading"><h2>Mitglieder <span className="count">{data.members.filter(m => m.active).length}</span></h2><button className="text-button" onClick={onTemplates}><Settings2 size={17} />Vorlagen</button></div>
     <div className="card members-list">{data.members.map(member => <button key={member.id} className={`member-row ${!member.active ? 'member-inactive' : ''}`} onClick={() => setModal(member)}><span className="avatar">{initials(member.name)}</span><span className="member-copy"><strong>{member.name}</strong><span>{!member.active ? 'Deaktiviert' : member.roles.map(id => data.roles.find(r => r.id === id)?.title).filter(Boolean).join(' · ') || 'Noch kein Dienst'}</span></span>{member.isAdmin && <ShieldCheck size={17} className="muted" aria-label="Admin" />}<Chevron /></button>)}</div>
-    {modal === 'invite' && <InviteForm data={data} onClose={() => setModal(null)} />}
+    {modal === 'create' && <CreateMemberForm data={data} onChanged={onChanged} onClose={() => setModal(null)} />}
     {typeof modal === 'object' && modal && <EditMember data={data} member={modal} onChanged={onChanged} onClose={() => setModal(null)} />}
   </>;
 }
 
-function InviteForm({ data, onClose }: { data: AppData; onClose: () => void }) {
-  const [email, setEmail] = useState(''); const [roles, setRoles] = useState<string[]>([]); const [isAdmin, setIsAdmin] = useState(false);
-  const [busy, setBusy] = useState(false); const [error, setError] = useState(''); const [link, setLink] = useState(''); const [copied, setCopied] = useState(false);
+function CreateMemberForm({ data, onChanged, onClose }: { data: AppData; onChanged: Changed; onClose: () => void }) {
+  const [name, setName] = useState(''); const [password, setPassword] = useState(''); const [roles, setRoles] = useState<string[]>([]); const [isAdmin, setIsAdmin] = useState(false);
+  const [busy, setBusy] = useState(false); const [error, setError] = useState('');
   async function submit(e: FormEvent) {
     e.preventDefault(); setBusy(true); setError('');
-    try { const result = await api<{ token: string }>('/invites', { email, roles, isAdmin }); setLink(`${location.origin}/#invite=${encodeURIComponent(result.token)}`); } catch (e) { setError((e as Error).message); } finally { setBusy(false); }
+    try { await api<{ member: Member }>('/members', { name, password, roles, isAdmin }); await onChanged(); onClose(); } catch (e) { setError((e as Error).message); } finally { setBusy(false); }
   }
-  async function copy() { try { await navigator.clipboard.writeText(link); setCopied(true); } catch { setError('Kopieren ist hier nicht möglich. Du kannst den Link im Feld auswählen und kopieren.'); } }
-  return <Dialog title={link ? 'Einladung ist bereit' : 'Mitglied einladen'} onClose={onClose}>{link ? <div className="form-stack"><div className="invite-success"><Check size={28} /><p>Für {email}</p></div><label>Einladungslink<input value={link} readOnly onFocus={e => e.currentTarget.select()} /></label><p className="muted small">Der Link ist 7 Tage gültig und kann einmal verwendet werden. Teile ihn direkt mit der Person.</p><button className="button primary full" onClick={copy}>{copied ? <Check size={18} /> : <Copy size={18} />}{copied ? 'Link kopiert' : 'Link kopieren'}</button>{error && <ErrorNotice message={error} />}</div> : <form onSubmit={submit} className="form-stack"><label>E-Mail<input type="email" value={email} onChange={e => setEmail(e.target.value)} autoComplete="email" autoCapitalize="none" required /></label><RoleFields roles={data.roles} selected={roles} setSelected={setRoles} /><label className="choice standalone-choice"><input type="checkbox" checked={isAdmin} onChange={e => setIsAdmin(e.target.checked)} /><span>Admin-Rechte</span></label>{error && <ErrorNotice message={error} />}<button className="button primary full" disabled={busy}>{busy ? 'Wird erstellt…' : 'Einladungslink erstellen'}<UserPlus size={18} /></button></form>}</Dialog>;
+  return <Dialog title="Mitglied anlegen" onClose={onClose}><form onSubmit={submit} className="form-stack"><label>Name<input value={name} onChange={e => setName(e.target.value)} autoComplete="username" autoCapitalize="none" autoCorrect="off" maxLength={80} required /></label><label>Passwort<input type="password" value={password} onChange={e => setPassword(e.target.value)} autoComplete="new-password" minLength={12} maxLength={256} required /><small>Mindestens 12 Zeichen</small></label><RoleFields roles={data.roles} selected={roles} setSelected={setRoles} /><label className="choice standalone-choice"><input type="checkbox" checked={isAdmin} onChange={e => setIsAdmin(e.target.checked)} /><span>Admin-Rechte</span></label>{error && <ErrorNotice message={error} />}<button className="button primary full" disabled={busy}>{busy ? 'Wird erstellt…' : 'Mitglied anlegen'}<UserPlus size={18} /></button></form></Dialog>;
 }
 
 function EditMember({ data, member, onChanged, onClose }: { data: AppData; member: Member; onChanged: Changed; onClose: () => void }) {
   const [roles, setRoles] = useState(member.roles); const [isAdmin, setIsAdmin] = useState(member.isAdmin); const [active, setActive] = useState(member.active);
   const [busy, setBusy] = useState(false); const [error, setError] = useState('');
   async function submit(e: FormEvent) { e.preventDefault(); setBusy(true); setError(''); try { await api(`/members/${member.id}`, { roles, isAdmin, active }, 'PATCH'); await onChanged(); onClose(); } catch (e) { setError((e as Error).message); } finally { setBusy(false); } }
-  return <Dialog title={member.name} onClose={onClose}><form onSubmit={submit} className="form-stack"><p className="muted small">{member.email}</p><RoleFields roles={data.roles} selected={roles} setSelected={setRoles} /><p className="muted small">Die Dienstauswahl gilt für neue Gottesdienste. Bereits angelegte Aufgaben bleiben erhalten.</p><label className="choice standalone-choice"><input type="checkbox" checked={isAdmin} onChange={e => setIsAdmin(e.target.checked)} /><span>Admin-Rechte</span></label><label className="choice standalone-choice"><input type="checkbox" checked={active} onChange={e => setActive(e.target.checked)} /><span>Konto aktiv</span></label>{error && <ErrorNotice message={error} />}<button className="button primary full" disabled={busy}>{busy ? 'Wird gespeichert…' : 'Änderungen speichern'}<Check size={18} /></button></form></Dialog>;
+  return <Dialog title={member.name} onClose={onClose}><form onSubmit={submit} className="form-stack"><RoleFields roles={data.roles} selected={roles} setSelected={setRoles} /><p className="muted small">Die Dienstauswahl gilt für neue Gottesdienste. Bereits angelegte Aufgaben bleiben erhalten.</p><label className="choice standalone-choice"><input type="checkbox" checked={isAdmin} onChange={e => setIsAdmin(e.target.checked)} /><span>Admin-Rechte</span></label><label className="choice standalone-choice"><input type="checkbox" checked={active} onChange={e => setActive(e.target.checked)} /><span>Konto aktiv</span></label>{error && <ErrorNotice message={error} />}<button className="button primary full" disabled={busy}>{busy ? 'Wird gespeichert…' : 'Änderungen speichern'}<Check size={18} /></button></form></Dialog>;
 }
 
 export function PersonalTaskForm({ detail, onChanged, onClose }: { detail: ServiceDetail; onChanged: Changed; onClose: () => void }) {

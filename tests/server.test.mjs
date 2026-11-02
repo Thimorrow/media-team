@@ -1,10 +1,11 @@
 import test from 'node:test';
+import { request as httpRequest } from 'node:http';
 import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
-import { createApp } from '../server/app.mjs';
+import { createApp, hashPassword } from '../server/app.mjs';
 
 test('Media-Team API: Anmeldung, Berechtigungen, Gottesdienste und Persistenz', async t => {
   const dir = await mkdtemp(join(tmpdir(), 'media-team-test-'));
@@ -19,17 +20,18 @@ test('Media-Team API: Anmeldung, Berechtigungen, Gottesdienste und Persistenz', 
     const value = await response.json();
     return { status: response.status, value, cookie: response.headers.get('set-cookie')?.split(';')[0], headers: response.headers };
   };
-  let admin, anna, ben, outsider, serviceId, sharedId, annaTaskId, inviteToken;
+  let admin, anna, ben, outsider, serviceId, sharedId, annaTaskId;
   const secret = 'This is a strong test password!';
-  const invite = async (address, roles = ['propresenter'], isAdmin = false) => {
-    const issued = await request('/api/invites', { method: 'POST', cookie: admin.cookie, data: { email: address, roles, isAdmin } });
+  const member = async (name, roles = ['propresenter'], isAdmin = false) => {
+    const issued = await request('/api/members', { method: 'POST', cookie: admin.cookie, data: { name, password: secret, roles, isAdmin } });
     assert.equal(issued.status, 201);
-    return issued.value.token;
+    assert.equal('email' in issued.value.member, false);
+    return request('/api/login', { method: 'POST', data: { name, password: secret } });
   };
   try {
     if (databaseUrl) await t.test('Postgres-Tabellen liegen im privaten Schema und Web-API-Rollen erhalten keinen Zugriff', async () => {
-      const tables = await app.db.prepare("SELECT table_name FROM information_schema.tables WHERE table_schema=? AND table_name IN ('users','sessions','invites','tasks')").all(schema);
-      assert.equal(tables.length, 4);
+      const tables = await app.db.prepare("SELECT table_name FROM information_schema.tables WHERE table_schema=? AND table_name IN ('users','sessions','tasks')").all(schema);
+      assert.equal(tables.length, 3);
       const apiRoles = await app.db.prepare("SELECT rolname FROM pg_roles WHERE rolname IN ('anon','authenticated')").all();
       for (const { rolname } of apiRoles) {
         assert.equal((await app.db.prepare("SELECT has_schema_privilege(?,?,'USAGE') AS allowed").get(rolname, schema)).allowed, false);
@@ -40,8 +42,8 @@ test('Media-Team API: Anmeldung, Berechtigungen, Gottesdienste und Persistenz', 
     await t.test('Erstes Admin-Konto braucht Einrichtungscode, sichere Sitzung und privates Passwort', async () => {
       assert.equal((await request('/api/session')).value.needsSetup, true);
       assert.equal((await request('/api/app')).status, 401);
-      assert.equal((await request('/api/setup', { method: 'POST', data: { token: 'wrong', name: 'Admin', email: 'admin@example.test', password: secret } })).status, 403);
-      const setup = await Promise.all([1, 2].map(() => request('/api/setup', { method: 'POST', data: { token: 'test-setup-only', name: 'Admin', email: 'admin@example.test', password: secret } })));
+      assert.equal((await request('/api/setup', { method: 'POST', data: { token: 'wrong', name: 'Admin', password: secret } })).status, 403);
+      const setup = await Promise.all([1, 2].map(() => request('/api/setup', { method: 'POST', data: { token: 'test-setup-only', name: 'Admin', password: secret } })));
       assert.deepEqual(setup.map(response => response.status).sort(), [201, 409]);
       admin = setup.find(response => response.status === 201);
       assert.equal(admin.status, 201);
@@ -53,29 +55,32 @@ test('Media-Team API: Anmeldung, Berechtigungen, Gottesdienste und Persistenz', 
       const stored = (await app.db.prepare('SELECT password_hash FROM users WHERE id=?').get(admin.value.user.id)).password_hash;
       assert.notEqual(stored, secret);
       assert.ok(!JSON.stringify(admin.value).includes(stored));
-      assert.equal((await request('/api/login', { method: 'POST', data: { email: 'admin@example.test', password: 'wrong' } })).status, 401);
+      assert.equal((await request('/api/login', { method: 'POST', data: { name: 'Admin', password: 'wrong' } })).status, 401);
     });
-    await t.test('Einladungen sind einmalig, zeitlich begrenzt und haben feste Rechte', async () => {
-      inviteToken = await invite('anna@example.test');
-      assert.equal((await request(`/api/invites/${inviteToken}`)).value.email, 'anna@example.test');
-      anna = await request('/api/join', { method: 'POST', data: { token: inviteToken, name: 'Anna', password: secret, isAdmin: true } });
-      assert.equal(anna.status, 201);
+    await t.test('Admins legen Konten direkt an; Namen sind eindeutig und keine E-Mail-Adressen nötig', async () => {
+      anna = await member('Anna');
+      ben = await member('Ben');
+      outsider = await member('Other', ['lighting']);
       assert.equal(anna.value.user.isAdmin, false);
-      assert.equal((await request('/api/join', { method: 'POST', data: { token: inviteToken, name: 'Other', password: secret } })).status, 410);
-      assert.equal((await request(`/api/invites/${inviteToken}`)).status, 404);
-      const expired = await invite('expired@example.test');
-      await app.db.prepare('UPDATE invites SET expires_at=0 WHERE token_hash=?').run(createHash('sha256').update(expired).digest('hex'));
-      assert.equal((await request('/api/join', { method: 'POST', data: { token: expired, name: 'Expired', password: secret } })).status, 410);
-      ben = await request('/api/join', { method: 'POST', data: { token: await invite('ben@example.test'), name: 'Ben', password: secret } });
-      outsider = await request('/api/join', { method: 'POST', data: { token: await invite('other@example.test', ['lighting']), name: 'Other', password: secret } });
+      assert.equal((await request('/api/login', { method: 'POST', data: { name: '  ANNA  ', password: secret } })).status, 200);
+      assert.equal((await request('/api/members', { method: 'POST', data: { name: 'Unknown', password: secret, roles: [], isAdmin: true } })).status, 401);
+      assert.equal((await request('/api/members', { method: 'POST', cookie: admin.cookie, data: { name: '  anna ', password: secret, roles: [], isAdmin: true } })).status, 409);
+      assert.equal((await request('/api/login', { method: 'POST', data: { name: 'Anna', password: secret } })).value.user.isAdmin, false);
+      assert.equal((await request('/api/members', { method: 'POST', cookie: admin.cookie, data: { name: 'some@example.test', password: secret, roles: [], isAdmin: false } })).status, 400);
+      assert.equal((await request('/api/join', { method: 'POST', data: { name: 'Other', password: secret } })).status, 404);
+      assert.equal((await request('/api/invites', { method: 'POST', cookie: admin.cookie, data: {} })).status, 404);
+      const normalized = await member('  Jörg   Müller-Smith  ', []);
+      assert.equal(normalized.value.user.name, 'Jörg Müller-Smith');
+      assert.equal((await request('/api/login', { method: 'POST', data: { name: 'JÖRG MÜLLER-SMITH', password: secret } })).status, 200);
+      assert.equal('email' in normalized.value.user, false);
     });
     await t.test('Admin-Funktionen und CSRF sind serverseitig geschützt', async () => {
       assert.equal((await request('/api/templates', { cookie: anna.cookie })).status, 403);
-      assert.equal((await request('/api/invites', { method: 'POST', cookie: anna.cookie, data: { email: 'evil@example.test', roles: [], isAdmin: true } })).status, 403);
+      assert.equal((await request('/api/members', { method: 'POST', cookie: anna.cookie, data: { name: 'Evil', password: secret, roles: [], isAdmin: true } })).status, 403);
       assert.equal((await request('/api/services', { method: 'POST', cookie: anna.cookie, data: {} })).status, 403);
-      assert.equal((await request('/api/invites', { method: 'POST', cookie: admin.cookie, data: {}, headers: { Origin: 'https://evil.example' } })).status, 403);
+      assert.equal((await request('/api/members', { method: 'POST', cookie: admin.cookie, data: {}, headers: { Origin: 'https://evil.example' } })).status, 403);
       assert.equal((await request('/api/logout', { method: 'POST', cookie: admin.cookie, data: {}, headers: { 'Sec-Fetch-Site': 'cross-site' } })).status, 403);
-      assert.equal((await request('/api/invites', { method: 'POST', cookie: admin.cookie, data: { email: 'evil@example.test', roles: ['nonexistent'], isAdmin: false } })).status, 400);
+      assert.equal((await request('/api/members', { method: 'POST', cookie: admin.cookie, data: { name: 'Evil', password: secret, roles: ['nonexistent'], isAdmin: false } })).status, 400);
       assert.equal((await request('/api/app', { cookie: anna.cookie })).value.members.length, 0);
     });
     await t.test('Gottesdienst erzeugt gemeinsame und getrennte persönliche Aufgaben', async () => {
@@ -129,14 +134,14 @@ test('Media-Team API: Anmeldung, Berechtigungen, Gottesdienste und Persistenz', 
       assert.ok((await request(`/api/services/${serviceId}`, { cookie: anna.cookie })).value.personal[0].tasks.some(task => task.title === 'Ansage abholen'));
       assert.ok(!(await request(`/api/services/${serviceId}`, { cookie: ben.cookie })).value.personal[0].tasks.some(task => task.title === 'Ansage abholen'));
     });
-    await t.test('Gleichzeitige Änderungen und Einladungsannahmen sind atomar', async () => {
+    await t.test('Gleichzeitige Aufgaben- und Namensänderungen sind atomar', async () => {
       const detail = (await request(`/api/services/${serviceId}`, { cookie: anna.cookie })).value;
       const task = detail.common.find(task => task.revision === 0);
       const changed = await Promise.all([anna, ben].map(member => request(`/api/services/${serviceId}/tasks/${task.id}`, { method: 'PUT', cookie: member.cookie, data: { done: true, revision: 0 } })));
       assert.deepEqual(changed.map(response => response.status).sort(), [200, 409]);
-      const oneUse = await invite('concurrent@example.test', []);
-      const accepted = await Promise.all(['First', 'Second'].map(name => request('/api/join', { method: 'POST', data: { token: oneUse, name, password: secret } })));
-      assert.deepEqual(accepted.map(response => response.status).sort(), [201, 410]);
+      const accepted = await Promise.all(['Concurrent', ' CONCURRENT '].map(name => request('/api/members', { method: 'POST', cookie: admin.cookie, data: { name, password: secret, roles: [], isAdmin: false } })));
+      assert.deepEqual(accepted.map(response => response.status).sort(), [201, 409]);
+      assert.equal((await app.db.prepare('SELECT COUNT(*) n FROM users WHERE login_name=?').get('concurrent')).n, 1);
     });
     await t.test('Archiv ist schreibgeschützt; letzter Admin bleibt erhalten; deaktivierte Konten verlieren Sessions', async () => {
       assert.equal((await request(`/api/services/${serviceId}`, { method: 'PATCH', cookie: admin.cookie, data: { archived: true } })).status, 200);
@@ -144,7 +149,7 @@ test('Media-Team API: Anmeldung, Berechtigungen, Gottesdienste und Persistenz', 
       assert.equal((await request(`/api/members/${admin.value.user.id}`, { method: 'PATCH', cookie: admin.cookie, data: { roles: [], isAdmin: false, active: true } })).status, 409);
       assert.equal((await request(`/api/members/${ben.value.user.id}`, { method: 'PATCH', cookie: admin.cookie, data: { roles: ['propresenter'], isAdmin: false, active: false } })).status, 200);
       assert.equal((await request('/api/app', { cookie: ben.cookie })).status, 401);
-      assert.equal((await request('/api/login', { method: 'POST', data: { email: 'ben@example.test', password: secret } })).status, 401);
+      assert.equal((await request('/api/login', { method: 'POST', data: { name: 'Ben', password: secret } })).status, 401);
     });
     await t.test('Daten und Anmeldung bleiben nach Serverneustart erhalten; Abmelden widerruft Sitzung', async () => {
       await app.close();
@@ -157,37 +162,83 @@ test('Media-Team API: Anmeldung, Berechtigungen, Gottesdienste und Persistenz', 
       assert.equal((await request('/api/session')).value.needsSetup, false);
       assert.equal((await request('/api/logout', { method: 'POST', cookie: anna.cookie, data: {} })).status, 200);
       assert.equal((await request('/api/app', { cookie: anna.cookie })).status, 401);
-      const login = await request('/api/login', { method: 'POST', data: { email: 'anna@example.test', password: secret } });
+      const login = await request('/api/login', { method: 'POST', data: { name: 'Anna', password: secret } });
       assert.equal(login.status, 200);
       assert.equal((await request('/api/app', { cookie: login.cookie })).status, 200);
     });
     await t.test('Anmeldebegrenzung ist in der Datenbank gespeichert und überlebt Neustarts', async () => {
       for (let attempt = 0; attempt < 20; attempt++) {
-        const response = await request('/api/login', { method: 'POST', data: { email: 'limited@example.test', password: secret } });
+        const response = await request('/api/login', { method: 'POST', data: { name: 'Limited', password: secret } });
         assert.equal(response.status, 401);
       }
-      assert.equal((await request('/api/login', { method: 'POST', data: { email: 'limited@example.test', password: secret } })).status, 429);
+      assert.equal((await request('/api/login', { method: 'POST', data: { name: 'Limited', password: secret } })).status, 429);
       await app.close();
       app = await createApp({ dbPath, databaseUrl, schema, setupToken: 'test-setup-only' });
       await new Promise(resolve => app.server.listen(0, '127.0.0.1', resolve));
       origin = `http://127.0.0.1:${app.server.address().port}`;
-      assert.equal((await request('/api/login', { method: 'POST', data: { email: 'limited@example.test', password: secret } })).status, 429);
-      assert.equal((await request('/api/login', { method: 'POST', data: { email: 'anna@example.test', password: secret } })).status, 200);
+      assert.equal((await request('/api/login', { method: 'POST', data: { name: 'Limited', password: secret } })).status, 429);
+      assert.equal((await request('/api/login', { method: 'POST', data: { name: 'Anna', password: secret } })).status, 200);
     });
     await t.test('Passwortänderung prüft das aktuelle Passwort und widerruft andere Sitzungen', async () => {
-      const first = await request('/api/login', { method: 'POST', data: { email: 'anna@example.test', password: secret } });
-      const second = await request('/api/login', { method: 'POST', data: { email: 'anna@example.test', password: secret } });
+      const first = await request('/api/login', { method: 'POST', data: { name: 'Anna', password: secret } });
+      const second = await request('/api/login', { method: 'POST', data: { name: 'Anna', password: secret } });
       assert.equal((await request('/api/password', { method: 'POST', cookie: first.cookie, data: { currentPassword: 'wrong', password: 'New secure password 2026!' } })).status, 400);
       assert.equal((await request('/api/password', { method: 'POST', cookie: first.cookie, data: { currentPassword: secret, password: 'short' } })).status, 400);
       assert.equal((await request('/api/password', { method: 'POST', cookie: first.cookie, data: { currentPassword: secret, password: 'New secure password 2026!' } })).status, 200);
       assert.equal((await request('/api/app', { cookie: first.cookie })).status, 200);
       assert.equal((await request('/api/app', { cookie: second.cookie })).status, 401);
-      assert.equal((await request('/api/login', { method: 'POST', data: { email: 'anna@example.test', password: secret } })).status, 401);
-      assert.equal((await request('/api/login', { method: 'POST', data: { email: 'anna@example.test', password: 'New secure password 2026!' } })).status, 200);
+      assert.equal((await request('/api/login', { method: 'POST', data: { name: 'Anna', password: secret } })).status, 401);
+      assert.equal((await request('/api/login', { method: 'POST', data: { name: 'Anna', password: 'New secure password 2026!' } })).status, 200);
+    });
+    await t.test('Entzogene Admin-Rechte während eines offenen Anfragebodys verhindern neue Konten', { timeout: 15_000 }, async () => {
+      const revoker = await member('Revoker', [], true);
+      try {
+        for (const action of ['deactivate', 'demote']) {
+          const actor = await member(`Paused ${action}`, [], true);
+          const createdName = `Forbidden ${action}`;
+          let resolveBody;
+          const readingBody = new Promise(resolve => { resolveBody = resolve; });
+          const observe = incoming => {
+            if (incoming.headers['x-test-pause'] !== action) return;
+            const listener = event => {
+              if (event === 'readable') {
+                incoming.removeListener('newListener', listener);
+                resolveBody();
+              }
+            };
+            incoming.on('newListener', listener);
+          };
+          app.server.prependListener('request', observe);
+          let pending;
+          const result = new Promise((resolve, reject) => {
+            pending = httpRequest(origin + '/api/members', { method: 'POST', headers: { 'Content-Type': 'application/json', cookie: actor.cookie, 'x-test-pause': action } }, response => {
+              let content = '';
+              response.setEncoding('utf8');
+              response.on('data', chunk => { content += chunk; });
+              response.once('end', () => resolve({ status: response.statusCode, value: JSON.parse(content) }));
+            });
+            pending.once('error', reject);
+            pending.write('{"name":');
+          });
+          try {
+            await readingBody;
+            const revoked = await request(`/api/members/${actor.value.user.id}`, { method: 'PATCH', cookie: revoker.cookie, data: { roles: [], isAdmin: action === 'deactivate', active: action !== 'deactivate' } });
+            assert.equal(revoked.status, 200);
+            pending.end(JSON.stringify(createdName) + ',"password":' + JSON.stringify(secret) + ',"roles":[],"isAdmin":true}');
+            const denied = await result;
+            assert.equal(denied.status, action === 'deactivate' ? 401 : 403);
+            assert.equal((await app.db.prepare('SELECT COUNT(*) n FROM users WHERE login_name=?').get(createdName.toLowerCase())).n, 0);
+          } finally {
+            app.server.removeListener('request', observe);
+            pending.destroy();
+          }
+        }
+      } finally {
+        assert.equal((await request(`/api/members/${revoker.value.user.id}`, { method: 'PATCH', cookie: admin.cookie, data: { roles: [], isAdmin: false, active: false } })).status, 200);
+      }
     });
     await t.test('Gleichzeitige Admin-Abstufungen erhalten ein aktives Admin-Konto', async () => {
-      const secondToken = await invite('second-admin@example.test', [], true);
-      const second = await request('/api/join', { method: 'POST', data: { token: secondToken, name: 'Second Admin', password: secret } });
+      const second = await member('Second Admin', [], true);
       const lowered = await Promise.all([admin, second].map(user => request(`/api/members/${user.value.user.id}`, { method: 'PATCH', cookie: user.cookie, data: { roles: [], isAdmin: false, active: true } })));
       assert.deepEqual(lowered.map(response => response.status).sort(), [200, 409]);
       assert.equal((await app.db.prepare('SELECT COUNT(*) n FROM users WHERE is_admin=1 AND active=1').get()).n, 1);
@@ -201,4 +252,56 @@ test('Media-Team API: Anmeldung, Berechtigungen, Gottesdienste und Persistenz', 
       await rm(dir, { recursive: true, force: true });
     }
   }
+});
+
+test('Migration auf Namen bewahrt Passwörter, Sitzungen, Aufgaben und IDs', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'media-name-migration-'));
+  const dbPath = join(dir, 'legacy.sqlite');
+  const secret = 'Legacy secure password 2026!';
+  const encoded = await hashPassword(secret);
+  const rawSession = 'legacy-session-token';
+  let app = await createApp({ dbPath, setupToken: 'unused' });
+  try {
+    await app.db.prepare('INSERT INTO users (id,name,login_name,password_hash,is_admin,roles) VALUES (?,?,?,?,?,?)').run('legacy-person', '  Jörg   Müller ', 'legacy@example.test', encoded, 1, '["sound"]');
+    await app.db.prepare('INSERT INTO sessions VALUES (?,?,?)').run(createHash('sha256').update(rawSession).digest('hex'), 'legacy-person', Date.now() + 60_000);
+    await app.db.prepare('INSERT INTO services (id,title,starts_at) VALUES (?,?,?)').run('legacy-service', 'Gottesdienst', '2026-11-01T09:00:00.000Z');
+    await app.db.prepare('INSERT INTO tasks (id,service_id,owner_id,title,phase,position,done,done_by,revision) VALUES (?,?,?,?,?,?,?,?,?)').run('legacy-task', 'legacy-service', 'legacy-person', 'Mikrofon prüfen', 'before', 0, 1, 'legacy-person', 3);
+    await app.db.exec('ALTER TABLE users RENAME COLUMN login_name TO email');
+    await app.close();
+    app = await createApp({ dbPath, setupToken: 'unused' });
+    assert.deepEqual({ ...await app.db.prepare('SELECT id,name,login_name,password_hash,roles FROM users').get() }, { id: 'legacy-person', name: 'Jörg Müller', login_name: 'jörg müller', password_hash: encoded, roles: '["sound"]' });
+    assert.equal((await app.db.prepare('SELECT done FROM tasks WHERE id=?').get('legacy-task')).done, 1);
+    await new Promise(resolve => app.server.listen(0, '127.0.0.1', resolve));
+    const origin = `http://127.0.0.1:${app.server.address().port}`;
+    assert.equal((await fetch(origin + '/api/app', { headers: { cookie: `media_session=${rawSession}` } })).status, 200);
+    const login = await fetch(origin + '/api/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name: 'JÖRG MÜLLER', password: secret }) });
+    assert.equal(login.status, 200);
+    assert.equal((await login.json()).user.id, 'legacy-person');
+    await app.close();
+    app = await createApp({ dbPath, setupToken: 'unused' });
+    assert.equal((await app.db.prepare('SELECT login_name FROM users').get()).login_name, 'jörg müller');
+  } finally {
+    await app.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('Migration mit doppelten Namen bricht ohne Datenänderung ab', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'media-name-conflict-'));
+  const dbPath = join(dir, 'legacy.sqlite');
+  const app = await createApp({ dbPath, setupToken: 'unused' });
+  await app.db.prepare('INSERT INTO users (id,name,login_name,password_hash) VALUES (?,?,?,?)').run('first', 'Anna', 'first@example.test', 'unchanged-first');
+  await app.db.prepare('INSERT INTO users (id,name,login_name,password_hash) VALUES (?,?,?,?)').run('second', ' ANNA ', 'second@example.test', 'unchanged-second');
+  await app.db.exec('ALTER TABLE users RENAME COLUMN login_name TO email');
+  await app.close();
+  try {
+    await assert.rejects(createApp({ dbPath, setupToken: 'unused' }), /doppelte Namen/);
+    const { DatabaseSync } = await import('node:sqlite');
+    const check = new DatabaseSync(dbPath);
+    try {
+      assert.ok(check.prepare('PRAGMA table_info(users)').all().some(column => column.name === 'email'));
+      assert.equal(check.prepare('SELECT password_hash FROM users WHERE id=?').get('first').password_hash, 'unchanged-first');
+      assert.equal(check.prepare('SELECT name FROM users WHERE id=?').get('second').name, ' ANNA ');
+    } finally { check.close(); }
+  } finally { await rm(dir, { recursive: true, force: true }); }
 });

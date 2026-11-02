@@ -27,10 +27,15 @@ function text(value, name, max = 200) {
   if (typeof value !== 'string' || !value.trim() || value.trim().length > max) fail(400, `${name} fehlt oder ist zu lang.`);
   return value.trim();
 }
-function email(value) {
-  const result = text(value, 'E-Mail', 254).toLowerCase();
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(result)) fail(400, 'Bitte eine gültige E-Mail-Adresse angeben.');
-  return result;
+export function normalizeAccountName(value) {
+  if (typeof value !== 'string') fail(400, 'Bitte einen Namen angeben.');
+  const name = value.normalize('NFKC').trim().replace(/\s+/gu, ' ');
+  if (name.length < 2 || name.length > 80 || !/^[\p{L}\p{M}\p{N} ._'’\-]+$/u.test(name) || !/[\p{L}\p{N}]/u.test(name)) fail(400, 'Der Name muss 2 bis 80 Zeichen lang sein und darf keine E-Mail-Adresse sein.');
+  return { name, loginName: name.toLocaleLowerCase('de-DE') };
+}
+function accountConflict(error) {
+  if (error.code === '23505' || /UNIQUE constraint failed: users\.login_name/.test(error.message)) fail(409, 'Dieser Name ist bereits vergeben.');
+  throw error;
 }
 function password(value) {
   if (typeof value !== 'string' || value.length < 12 || value.length > 256) fail(400, 'Das Passwort muss 12 bis 256 Zeichen lang sein.');
@@ -103,9 +108,8 @@ export async function createApp({ dbPath, databaseUrl, schema, setupToken, baseU
   const db = await openDatabase({ dbPath, databaseUrl, schema });
   if (db.kind === 'sqlite') await db.exec('PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;');
   const schemaSql = `
-    CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, name TEXT NOT NULL, email TEXT UNIQUE NOT NULL, password_hash TEXT NOT NULL, is_admin INTEGER NOT NULL DEFAULT 0, active INTEGER NOT NULL DEFAULT 1, roles TEXT NOT NULL DEFAULT '[]');
+    CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, name TEXT NOT NULL, login_name TEXT UNIQUE NOT NULL, password_hash TEXT NOT NULL, is_admin INTEGER NOT NULL DEFAULT 0, active INTEGER NOT NULL DEFAULT 1, roles TEXT NOT NULL DEFAULT '[]');
     CREATE TABLE IF NOT EXISTS sessions (token_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), expires_at INTEGER NOT NULL);
-    CREATE TABLE IF NOT EXISTS invites (token_hash TEXT PRIMARY KEY, email TEXT NOT NULL, is_admin INTEGER NOT NULL, roles TEXT NOT NULL, expires_at INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS services (id TEXT PRIMARY KEY, title TEXT NOT NULL, starts_at TEXT NOT NULL, archived INTEGER NOT NULL DEFAULT 0);
     CREATE TABLE IF NOT EXISTS participants (service_id TEXT NOT NULL REFERENCES services(id), user_id TEXT NOT NULL REFERENCES users(id), roles TEXT NOT NULL, PRIMARY KEY(service_id,user_id));
@@ -113,13 +117,28 @@ export async function createApp({ dbPath, databaseUrl, schema, setupToken, baseU
     CREATE INDEX IF NOT EXISTS tasks_service ON tasks(service_id);
     CREATE INDEX IF NOT EXISTS sessions_user ON sessions(user_id);
     CREATE TABLE IF NOT EXISTS rate_limits (key TEXT PRIMARY KEY, count INTEGER NOT NULL, reset_at BIGINT NOT NULL);`;
-  await db.transaction(async () => {
-    if (db.kind === 'postgres') await db.prepare('SELECT pg_advisory_xact_lock(741992)').get();
-    await db.exec(schemaSql.replace(/expires_at INTEGER/g, 'expires_at BIGINT'));
-  });
+  try {
+    await db.transaction(async () => {
+      if (db.kind === 'postgres') await db.prepare('SELECT pg_advisory_xact_lock(741992)').get();
+      await db.exec(schemaSql.replace(/expires_at INTEGER/g, 'expires_at BIGINT'));
+      const columns = db.kind === 'postgres'
+        ? (await db.prepare("SELECT column_name AS name FROM information_schema.columns WHERE table_schema=? AND table_name='users'").all(schema || 'media_team'))
+        : await db.prepare('PRAGMA table_info(users)').all();
+      if (columns.some(column => column.name === 'email')) {
+        const users = await db.prepare('SELECT id,name FROM users').all();
+        const names = users.map(user => ({ ...user, ...normalizeAccountName(user.name) }));
+        if (new Set(names.map(user => user.loginName)).size !== names.length) throw new Error('Die bestehenden Konten haben doppelte Namen. Bitte diese vor der Umstellung eindeutig benennen.');
+        await db.exec('ALTER TABLE users RENAME COLUMN email TO login_name');
+        for (const user of names) await db.prepare('UPDATE users SET name=?,login_name=? WHERE id=?').run(user.name, user.loginName, user.id);
+      }
+    });
+  } catch (error) {
+    await db.close();
+    throw error;
+  }
   await db.prepare('INSERT INTO settings VALUES (?,?) ON CONFLICT (key) DO NOTHING').run('templates', JSON.stringify(initialTemplates()));
   const templates = async () => JSON.parse((await db.prepare('SELECT value FROM settings WHERE key=?').get('templates')).value);
-  const publicUser = row => ({ id: row.id, name: row.name, email: row.email, isAdmin: !!row.is_admin, roles: JSON.parse(row.roles) });
+  const publicUser = row => ({ id: row.id, name: row.name, isAdmin: !!row.is_admin, roles: JSON.parse(row.roles) });
   const roles = async value => {
     const current = await templates();
     if (!Array.isArray(value) || value.length > 30 || value.some(id => typeof id !== 'string' || !current.roles.some(role => role.id === id))) fail(400, 'Ungültiger Dienst.');
@@ -194,25 +213,25 @@ export async function createApp({ dbPath, databaseUrl, schema, setupToken, baseU
       const value = await body(req);
       if (await db.prepare('SELECT 1 FROM users LIMIT 1').get()) fail(409, 'Die App ist bereits eingerichtet.');
       if (!setupToken || typeof value.token !== 'string' || hash(value.token) !== hash(setupToken)) fail(403, 'Der Einrichtungscode ist ungültig.');
-      const name = text(value.name, 'Name', 80), address = email(value.email), encoded = await hashPassword(password(value.password));
+      const { name, loginName } = normalizeAccountName(value.name), encoded = await hashPassword(password(value.password));
       const id = randomUUID();
       await transaction(async () => {
         if (db.kind === 'postgres') await db.prepare('SELECT pg_advisory_xact_lock(741993)').get();
         if (await db.prepare('SELECT 1 FROM users LIMIT 1').get()) fail(409, 'Die App ist bereits eingerichtet.');
-        await db.prepare('INSERT INTO users (id,name,email,password_hash,is_admin) VALUES (?,?,?,?,1)').run(id, name, address, encoded);
+        await db.prepare('INSERT INTO users (id,name,login_name,password_hash,is_admin) VALUES (?,?,?,?,1)').run(id, name, loginName, encoded);
       });
       await newSession(req, res, id);
       return json(res, 201, { user: publicUser(await db.prepare('SELECT * FROM users WHERE id=?').get(id)) });
     }
     if (method === 'POST' && path === '/api/login') {
-      const value = await body(req), address = email(value.email);
+      const value = await body(req), { loginName } = normalizeAccountName(value.name);
       await rateLimit(req, 'login', 200);
-      await rateLimit(req, `login:${hash(address)}`);
-      if (typeof value.password !== 'string' || value.password.length > 256) fail(401, 'E-Mail oder Passwort stimmen nicht.');
-      const user = await db.prepare('SELECT * FROM users WHERE email=? AND active=1').get(address);
+      await rateLimit(req, `login:${hash(loginName)}`);
+      if (typeof value.password !== 'string' || value.password.length > 256) fail(401, 'Name oder Passwort stimmen nicht.');
+      const user = await db.prepare('SELECT * FROM users WHERE login_name=? AND active=1').get(loginName);
       const dummy = '00000000000000000000000000000000:' + '0'.repeat(128);
       const valid = await passwordMatches(value.password, user?.password_hash || dummy);
-      if (!user || !valid) fail(401, 'E-Mail oder Passwort stimmen nicht.');
+      if (!user || !valid) fail(401, 'Name oder Passwort stimmen nicht.');
       const current = await newSession(req, res, user.id, user.password_hash);
       return json(res, 200, { user: publicUser(current) });
     }
@@ -236,27 +255,6 @@ export async function createApp({ dbPath, databaseUrl, schema, setupToken, baseU
       });
       return json(res, 200, {});
     }
-    const inviteMatch = path.match(/^\/api\/invites\/([A-Za-z0-9_-]{40,100})$/);
-    if (method === 'GET' && inviteMatch) {
-      const invite = await db.prepare('SELECT * FROM invites WHERE token_hash=? AND expires_at>?').get(hash(inviteMatch[1]), Date.now());
-      if (!invite) fail(404, 'Diese Einladung ist abgelaufen oder bereits verwendet.');
-      return json(res, 200, { email: invite.email, isAdmin: !!invite.is_admin, roles: JSON.parse(invite.roles), expiresAt: new Date(Number(invite.expires_at)).toISOString() });
-    }
-    if (method === 'POST' && path === '/api/join') {
-      await rateLimit(req, 'join');
-      const value = await body(req), raw = text(value.token, 'Einladung', 100);
-      const invite = await db.prepare('SELECT * FROM invites WHERE token_hash=? AND expires_at>?').get(hash(raw), Date.now());
-      if (!invite) fail(410, 'Diese Einladung ist abgelaufen oder bereits verwendet.');
-      const name = text(value.name, 'Name', 80), encoded = await hashPassword(password(value.password)), id = randomUUID();
-      await transaction(async () => {
-        const consumed = await db.prepare('DELETE FROM invites WHERE token_hash=? AND expires_at>? RETURNING *').get(hash(raw), Date.now());
-        if (!consumed) fail(410, 'Diese Einladung ist abgelaufen oder bereits verwendet.');
-        if (await db.prepare('SELECT 1 FROM users WHERE email=?').get(consumed.email)) fail(409, 'Für diese E-Mail besteht bereits ein Konto.');
-        await db.prepare('INSERT INTO users (id,name,email,password_hash,is_admin,roles) VALUES (?,?,?,?,?,?)').run(id, name, consumed.email, encoded, consumed.is_admin, consumed.roles);
-      });
-      await newSession(req, res, id);
-      return json(res, 201, { user: publicUser(await db.prepare('SELECT * FROM users WHERE id=?').get(id)) });
-    }
     if (method === 'GET' && path === '/api/app') {
       const user = await requireUser(req);
       const rows = await db.prepare(user.is_admin ? 'SELECT * FROM services ORDER BY starts_at DESC' : 'SELECT services.* FROM services JOIN participants ON participants.service_id=services.id WHERE user_id=? ORDER BY starts_at DESC').all(...(user.is_admin ? [] : [user.id]));
@@ -272,22 +270,26 @@ export async function createApp({ dbPath, databaseUrl, schema, setupToken, baseU
       if (method === 'GET') return json(res, 200, await templates());
       if (method === 'PUT') {
         const value = validateTemplates(await body(req));
-        const usedRoles = (await db.prepare('SELECT roles FROM users UNION ALL SELECT roles FROM invites').all()).flatMap(row => JSON.parse(row.roles));
+        const usedRoles = (await db.prepare('SELECT roles FROM users').all()).flatMap(row => JSON.parse(row.roles));
         if (usedRoles.some(id => !value.roles.some(role => role.id === id))) fail(409, 'Ein zugewiesener Dienst kann nicht entfernt werden.');
         await db.prepare('UPDATE settings SET value=? WHERE key=?').run(JSON.stringify(value), 'templates');
         return json(res, 200, {});
       }
     }
-    if (method === 'POST' && path === '/api/invites') {
-      await requireAdmin(req);
-      const value = await body(req), address = email(value.email), assigned = await roles(value.roles), isAdmin = boolean(value.isAdmin, 'Admin-Recht');
-      if (await db.prepare('SELECT 1 FROM users WHERE email=?').get(address)) fail(409, 'Für diese E-Mail besteht bereits ein Konto.');
-      const raw = token(), expiresAt = Date.now() + sessionAge;
-      await transaction(async () => {
-        await db.prepare('DELETE FROM invites WHERE email=? OR expires_at<=?').run(address, Date.now());
-        await db.prepare('INSERT INTO invites VALUES (?,?,?,?,?)').run(hash(raw), address, +isAdmin, JSON.stringify(assigned), expiresAt);
-      });
-      return json(res, 201, { token: raw, expiresAt: new Date(expiresAt).toISOString() });
+    if (method === 'POST' && path === '/api/members') {
+      const actor = await requireAdmin(req);
+      const value = await body(req), { name, loginName } = normalizeAccountName(value.name);
+      const assigned = await roles(value.roles), isAdmin = boolean(value.isAdmin, 'Admin-Recht');
+      const encoded = await hashPassword(password(value.password)), id = randomUUID();
+      try {
+        await transaction(async () => {
+          const current = await db.prepare('SELECT * FROM users WHERE id=?' + (db.kind === 'postgres' ? ' FOR UPDATE' : '')).get(actor.id);
+          if (!current?.active || !await getUser(req)) fail(401, 'Bitte melde dich erneut an.');
+          if (!current.is_admin) fail(403, 'Dafür brauchst du ein Admin-Konto.');
+          await db.prepare('INSERT INTO users (id,name,login_name,password_hash,is_admin,roles) VALUES (?,?,?,?,?,?)').run(id, name, loginName, encoded, +isAdmin, JSON.stringify(assigned));
+        });
+      } catch (error) { accountConflict(error); }
+      return json(res, 201, { member: { ...publicUser(await db.prepare('SELECT * FROM users WHERE id=?').get(id)), active: true } });
     }
     const memberMatch = path.match(/^\/api\/members\/([^/]+)$/);
     if (method === 'PATCH' && memberMatch) {

@@ -21,7 +21,7 @@ Eine auf dem Handy installierbare PWA für das Media-Team der Kirche. Jedes Mitg
 - Schwerpunkt ist eine klare mobile Oberfläche mit großen antippbaren Aufgaben, sichtbarem Fortschritt und einer unten erreichbaren Navigation.
 - Gestaltung nach `emil-ask-emil`, mobile Plattformdetails nach `emil-mobile-native`, kurze Rückmeldungen nach `emil-animations`.
 - Lochies WebHaptics wird für dezentes haptisches Feedback vorgesehen. Tatsächliche Haptik und Bedienung als installierte PWA brauchen einen Test auf echten Handys.
-- Login über E-Mail und Passwort. Admins erstellen Einladungslinks, verwalten Mitglieder und Dienste, bearbeiten Vorlagen und sehen den Fortschritt. Die App versendet keine E-Mails.
+- Login ausschließlich über Name und Passwort. Admins legen Mitglieder direkt mit Name und Startpasswort an, verwalten Dienste und Vorlagen und sehen den Fortschritt. Keine E-Mail-Adressen, kein E-Mail-Versand und keine Einladungslinks.
 - Arbeitsname: Media Team. Daten werden serverseitig gespeichert; der Browser erhält keine Datenbankschlüssel.
 - Öffentliches Repository: https://github.com/Thimorrow/media-team. Aktueller Vorschau-Branch: `codex/preview/media-team`.
 - Vercel-Vorschau ist beauftragt. Supabase wird direkt verwendet, ohne Vercel-Marketplace-Verknüpfung. Das vom Nutzer bereitgestellte Projekt ist `fhpsxgapmhcqwymtsloc`.
@@ -29,7 +29,7 @@ Eine auf dem Handy installierbare PWA für das Media-Team der Kirche. Jedes Mitg
 
 ## Noch offen
 
-- Einmalige Einrichtung des ersten echten Admin-Kontos durch den Nutzer. Keine Demo-Konten in der Cloud.
+- Der erste echte Admin wird auf ausdrücklichen Nutzerauftrag angelegt. Keine Demo-Konten in der Cloud.
 - Tatsächliche Zuordnung der Dienste zu Mitgliedern erfolgt durch Admins in der App.
 - Ist „Flur 2“ die richtige Ortsangabe?
 - Vorschlag für nach dem Dienst: Kamera-Akkus an die Ladestation legen.
@@ -78,3 +78,11 @@ Die lokale Browserprüfung hat Anmeldung, Checkbox-Speicherung über Neuladen so
 - Repository ist öffentlich. Der aktuelle Stand liegt auf `codex/preview/media-team`; der ursprüngliche Standardbranch `codex/feat/media-team-app` wurde nicht verändert. Die automatische Freigabeprüfung hat einen Wechsel des Standardbranches abgelehnt. Aktuellen Quellstand daher über den Vorschau-Branch öffnen.
 - Dokumentationsänderungen nach der geprüften Code-Revision ändern kein Laufzeitverhalten. Weitere visuelle Änderungen sind auf Nutzerwunsch gestoppt.
 - Offen: erste echte Anmeldung durch den Nutzer; Installation, Bildschirmtastatur, sichere Bildschirmränder und tatsächliche Haptik auf echten Handys. Eine Desktop-Browseransicht ersetzt diese Abnahme nicht.
+
+## Namensanmeldung, 2. November 2026
+
+Nutzerauftrag: Anmeldung nur mit Name und Passwort; der Agent soll den ersten echten Admin anlegen. Admins erstellen weitere Konten direkt, ohne E-Mail-Adressen oder Einladungslinks. Namen sind nach Vereinheitlichung von Groß-/Kleinschreibung und Leerzeichen eindeutig. Bestehende IDs, Passwörter, Sitzungen und Aufgaben bleiben bei der Umstellung erhalten; mehrdeutige alte Namen brechen die Migration ohne Änderung ab. Der frühere Hinweis auf eine ausschließlich menschliche Ersteinrichtung ist durch diesen Auftrag ersetzt.
+
+Umsetzung separat im Worktree `/private/tmp/media-team-name-login`, Branch `codex/feat/name-login`. Veröffentlicht werden ausschließlich diese Anmeldeänderungen auf Basis des bisherigen veröffentlichten Stands. Das lokal vorhandene UI-Redesign bleibt unveröffentlicht. Startpasswort und alle Datenbankzugänge liegen ausschließlich in ignorierten lokalen Dateien beziehungsweise geschützten Servervariablen.
+
+Prüfkriterien: Login nur mit Name/Passwort, nur Admins dürfen weitere Konten anlegen, doppelte Namen werden abgewiesen, Migration erhält vorhandene Daten, echtes Admin-Konto und Admin-Ansicht sind im Deployment zu prüfen.
